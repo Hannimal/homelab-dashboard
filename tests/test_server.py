@@ -394,7 +394,9 @@ class WifiSetup(unittest.TestCase):
         self.assertEqual(e.exception.message, "Connection activation failed: Secrets were required")
 
 
-class WifiHttp(unittest.TestCase):
+class LocalHttpBase(unittest.TestCase):
+    """A demo server on a free port, and a helper that POSTs JSON to it."""
+
     def post(self, base, path, body, headers=None, raw=None):
         import json
         import urllib.error
@@ -420,6 +422,8 @@ class WifiHttp(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
+
+class WifiHttp(LocalHttpBase):
     def test_scan_and_connect_with_pin(self):
         status, body = self.post(self.base, "/api/wifi/scan", {"pin": "4321"})
         self.assertEqual(status, 200)
@@ -459,6 +463,131 @@ class WifiHttp(unittest.TestCase):
 
     def test_unknown_post_route(self):
         self.assertEqual(self.post(self.base, "/api/state", {})[0], 404)
+
+
+class PinKey(unittest.TestCase):
+    def test_pin_and_the_older_wifi_pin_name(self):
+        for cfgd, expected in (({"pin": "4321"}, "4321"), ({"wifi_pin": "5555"}, "5555"),
+                               ({"pin": "1111", "wifi_pin": "2222"}, "1111"), ({"pin": "12"}, ""), ({}, "")):
+            self.assertEqual(server.PinGate(lambda: cfgd).configured_pin(), expected, cfgd)
+
+    def test_one_lockout_covers_wifi_and_power(self):
+        gate = server.PinGate(lambda: {"pin": "4321"})
+        wifi = server.WifiSetup(lambda: {"pin": "4321"}, demo=True, gate=gate)
+        power = server.PowerControl(gate, demo=True)
+        for _ in range(gate.MAX_FAILS - 1):
+            with self.assertRaises(server.ActionError):
+                wifi.authorise("0000")
+        with self.assertRaises(server.ActionError) as e:
+            power.run("0000", "check")          # the fifth wrong guess, through the other feature
+        self.assertEqual(e.exception.status, 403)
+        for guess in (lambda: wifi.authorise("4321"), lambda: power.run("4321", "reboot")):
+            with self.assertRaises(server.ActionError) as e:
+                guess()                          # even the right PIN is refused while locked
+            self.assertEqual(e.exception.status, 429)
+
+
+class PowerTests(unittest.TestCase):
+    def make(self, demo=False, pin="4321"):
+        gate = server.PinGate(lambda: {"pin": pin}, demo=demo)
+        return server.PowerControl(gate, demo=demo)
+
+    def run_action(self, power, action, result=None):
+        done = result or mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(server.subprocess, "run", return_value=done) as run, \
+                mock.patch.object(server.shutil, "which", return_value="/usr/bin/systemctl"):
+            power.run("4321", action)
+        return run
+
+    def test_fixed_commands(self):
+        p = self.make()
+        self.assertEqual(self.run_action(p, "reboot").call_args.args[0], ["systemctl", "reboot"])
+        self.assertEqual(self.run_action(p, "shutdown").call_args.args[0], ["systemctl", "poweroff"])
+        self.assertEqual(self.run_action(p, "restart").call_args.args[0],
+                         ["systemctl", "restart", "--no-block", "homelab-dashboard.service"])
+
+    def test_check_verifies_the_pin_without_running_anything(self):
+        run = self.run_action(self.make(), "check")
+        run.assert_not_called()
+
+    def test_demo_mode_never_runs_a_command(self):
+        p = self.make(demo=True, pin="")     # demo PIN is 1234
+        with mock.patch.object(server.subprocess, "run") as run:
+            p.gate.check("1234")
+            for action in ("reboot", "shutdown", "restart"):
+                p.run("1234", action)
+        run.assert_not_called()
+
+    def test_wrong_pin_runs_nothing(self):
+        p = self.make()
+        with mock.patch.object(server.subprocess, "run") as run, \
+                mock.patch.object(server.shutil, "which", return_value="/usr/bin/systemctl"):
+            with self.assertRaises(server.ActionError) as e:
+                p.run("0000", "reboot")
+        self.assertEqual(e.exception.status, 403)
+        run.assert_not_called()
+
+    def test_unknown_or_hostile_actions_are_refused(self):
+        p = self.make()
+        for action in ("halt", "reboot; rm -rf /", "../reboot", "", None, ["reboot"], {"a": 1}, 7):
+            with mock.patch.object(server.subprocess, "run") as run, \
+                    mock.patch.object(server.shutil, "which", return_value="/usr/bin/systemctl"):
+                with self.assertRaises(server.ActionError) as e:
+                    p.run("4321", action)
+            self.assertEqual(e.exception.status, 400, repr(action))
+            run.assert_not_called()
+
+    def test_disabled_without_pin_or_systemctl(self):
+        self.assertEqual(self.make(pin="").status(), "no_pin")
+        with self.assertRaises(server.ActionError) as e:
+            self.make(pin="").run("1234", "reboot")
+        self.assertEqual(e.exception.status, 503)
+        with mock.patch.object(server.shutil, "which", return_value=None):
+            self.assertEqual(self.make().status(), "no_systemctl")
+
+    def test_polkit_refusal_gets_a_helpful_message(self):
+        denied = mock.Mock(returncode=1, stdout="", stderr="Failed to reboot system via logind: Interactive authentication required.\n")
+        with self.assertRaises(server.ActionError) as e:
+            self.run_action(self.make(), "reboot", denied)
+        self.assertEqual(e.exception.status, 502)
+        self.assertIn("--power", e.exception.message)
+
+    def test_timeout_and_missing_systemctl(self):
+        import subprocess
+        p = self.make()
+        with mock.patch.object(server.shutil, "which", return_value="/usr/bin/systemctl"):
+            with mock.patch.object(server.subprocess, "run", side_effect=subprocess.TimeoutExpired("systemctl", 15)):
+                with self.assertRaises(server.ActionError) as e:
+                    p.run("4321", "reboot")
+            self.assertEqual(e.exception.status, 504)
+            with mock.patch.object(server.subprocess, "run", side_effect=FileNotFoundError):
+                with self.assertRaises(server.ActionError) as e:
+                    p.run("4321", "reboot")
+            self.assertEqual(e.exception.status, 503)
+
+
+class PowerHttp(LocalHttpBase):
+    """The same loopback-only rules as Wi-Fi setup, plus the power routes."""
+
+    def test_power_menu_flow_in_demo(self):
+        self.assertEqual(self.post(self.base, "/api/power", {"pin": "4321", "action": "check"}), (200, {"ok": True}))
+        self.assertEqual(self.post(self.base, "/api/power", {"pin": "4321", "action": "reboot"}), (200, {"ok": True}))
+
+    def test_power_refuses_wrong_pin_bad_action_and_strangers(self):
+        self.assertEqual(self.post(self.base, "/api/power", {"pin": "0000", "action": "reboot"})[0], 403)
+        self.assertEqual(self.post(self.base, "/api/power", {"pin": "4321", "action": "format"})[0], 400)
+        self.assertEqual(self.post(self.base, "/api/power", {"pin": "4321", "action": ["reboot"]})[0], 400)
+        self.assertEqual(self.post(self.base, "/api/power", {"action": "reboot"})[0], 403)
+        self.assertEqual(self.post(self.base, "/api/power", {"pin": "4321", "action": "reboot"},
+                                   headers={"Host": "attacker.example"})[0], 403)
+        self.assertEqual(self.post(self.base, "/api/power", {"pin": "4321", "action": "reboot"},
+                                   headers={"Origin": "http://attacker.example"})[0], 403)
+
+    def test_pi_endpoint_reports_power_setup(self):
+        import json
+        import urllib.request
+        with urllib.request.urlopen(self.base + "/api/pi") as r:
+            self.assertEqual(json.loads(r.read())["power_setup"], "ready")
 
 
 class ScreenConfig(unittest.TestCase):

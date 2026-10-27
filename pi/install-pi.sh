@@ -7,6 +7,7 @@
 #   ./install-pi.sh --demo    # install, but show fake data (to test the screen)
 #   ./install-pi.sh --console # use the no-desktop kiosk even if a desktop is installed
 #   ./install-pi.sh --wifi    # let the screen's Wi-Fi settings change networks (needs NetworkManager)
+#   ./install-pi.sh --power   # let the screen's power menu reboot, shut down and restart (PIN-protected)
 set -euo pipefail
 
 DEST=/opt/homelab-dashboard
@@ -14,12 +15,14 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 DEMO_FLAG=""
 FORCE_CONSOLE=""
 WIFI=""
+POWER=""
 for arg in "$@"; do
   case "$arg" in
     --demo) DEMO_FLAG=" --demo" ;;
     --console) FORCE_CONSOLE=1 ;;   # no-desktop kiosk even if a desktop is installed
     --wifi) WIFI=1 ;;
-    *) echo "Unknown option: $arg (use --demo, --console and/or --wifi)" >&2; exit 1 ;;
+    --power) POWER=1 ;;
+    *) echo "Unknown option: $arg (use --demo, --console, --wifi and/or --power)" >&2; exit 1 ;;
   esac
 done
 
@@ -61,17 +64,21 @@ fi
 python3 -c "import json;json.load(open('$DEST/config.json'))" || { echo "config.json is not valid JSON" >&2; exit 1; }
 
 RUN_AS="DynamicUser=yes"
-if [ -n "$WIFI" ]; then
-  echo "==> Enabling Wi-Fi changes from the screen"
-  # NetworkManager asks polkit before it lets anyone scan or join a network. A DynamicUser
-  # has no stable name to write a rule for, so the service gets a fixed, login-less account,
-  # and one small rule grants that account only the four actions Wi-Fi setup needs.
-  # (Membership in netdev is not enough: on current Raspberry Pi OS polkit still answers
-  # "auth required" to a service, so NetworkManager refuses with "Not authorized".)
+# On-screen controls (Wi-Fi changes, power menu) need the service to be allowed to do one specific thing
+# through polkit. A DynamicUser has no stable name to write a rule for, so the service then gets a fixed,
+# login-less account. Once a rule from an earlier run exists the account is kept, so updating without
+# the flags does not quietly switch a feature off.
+EXISTING_RULES="$(ls /etc/polkit-1/rules.d/50-homelab-dashboard-*.rules 2>/dev/null || true)"
+if [ -n "$WIFI" ] || [ -n "$POWER" ] || [ -n "$EXISTING_RULES" ]; then
+  echo "==> Setting up on-screen controls"
   id -u homelab-dashboard >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin homelab-dashboard
-  sudo gpasswd -d homelab-dashboard netdev >/dev/null 2>&1 || true   # earlier versions added it; it grants nothing useful
+  sudo gpasswd -d homelab-dashboard netdev >/dev/null 2>&1 || true   # earlier versions added it; polkit ignores it for services
   sudo mkdir -p /etc/polkit-1/rules.d
-  sudo tee /etc/polkit-1/rules.d/50-homelab-dashboard-wifi.rules >/dev/null << 'RULES_EOF'
+  RUN_AS="User=homelab-dashboard"
+  if [ -n "$WIFI" ]; then
+    # NetworkManager asks polkit before anyone may scan or join a network (membership in netdev is
+    # not enough: polkit answers "auth required" to a service and NetworkManager says "Not authorized").
+    sudo tee /etc/polkit-1/rules.d/50-homelab-dashboard-wifi.rules >/dev/null << 'RULES_EOF'
 // Installed by homelab-dashboard (install.sh pi --wifi).
 // Lets the dashboard's service user scan for and join Wi-Fi networks, and nothing else.
 polkit.addRule(function(action, subject) {
@@ -86,27 +93,50 @@ polkit.addRule(function(action, subject) {
   }
 });
 RULES_EOF
-  RUN_AS="User=homelab-dashboard"
-  HAVE_PIN="$(python3 -c "import json;print(len(str(json.load(open('$DEST/config.json')).get('wifi_pin') or '')))")"
+  fi
+  if [ -n "$POWER" ]; then
+    sudo tee /etc/polkit-1/rules.d/50-homelab-dashboard-power.rules >/dev/null << 'RULES_EOF'
+// Installed by homelab-dashboard (install.sh pi --power).
+// Lets the dashboard's service user reboot or power off this machine, and restart its own service. Nothing else.
+polkit.addRule(function(action, subject) {
+  if (subject.user != "homelab-dashboard") return;
+  var allowed = [
+    "org.freedesktop.login1.reboot",
+    "org.freedesktop.login1.reboot-multiple-sessions",
+    "org.freedesktop.login1.power-off",
+    "org.freedesktop.login1.power-off-multiple-sessions"
+  ];
+  if (allowed.indexOf(action.id) !== -1) {
+    return polkit.Result.YES;
+  }
+  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+      action.lookup("unit") == "homelab-dashboard.service" && action.lookup("verb") == "restart") {
+    return polkit.Result.YES;
+  }
+});
+RULES_EOF
+  fi
+  # One PIN protects every on-screen control ("wifi_pin" is the older name for "pin")
+  HAVE_PIN="$(python3 -c "import json;c=json.load(open('$DEST/config.json'));print(len(str(c.get('pin') or c.get('wifi_pin') or '')))")"
   if [ "$HAVE_PIN" -lt 4 ]; then
     while :; do
-      read -r -s -p "   Choose a PIN (4-8 digits) to protect Wi-Fi changes on the screen: " WIFI_PIN; echo
-      case "$WIFI_PIN" in
+      read -r -s -p "   Choose a PIN (4-8 digits) to protect Wi-Fi and power controls on the screen: " SCREEN_PIN; echo
+      case "$SCREEN_PIN" in
         ''|*[!0-9]*) echo "   Digits only." ;;
-        *) if [ "${#WIFI_PIN}" -ge 4 ] && [ "${#WIFI_PIN}" -le 8 ]; then break; fi; echo "   4 to 8 digits." ;;
+        *) if [ "${#SCREEN_PIN}" -ge 4 ] && [ "${#SCREEN_PIN}" -le 8 ]; then break; fi; echo "   4 to 8 digits." ;;
       esac
     done
-    sudo WIFI_PIN="$WIFI_PIN" python3 - "$DEST/config.json" << 'PYEOF'
+    sudo SCREEN_PIN="$SCREEN_PIN" python3 - "$DEST/config.json" << 'PYEOF'
 import json, os, sys
 path = sys.argv[1]
 cfg = json.load(open(path))
-cfg["wifi_pin"] = os.environ["WIFI_PIN"]
+cfg["pin"] = os.environ["SCREEN_PIN"]
 json.dump(cfg, open(path, "w"), indent=2)
 PYEOF
-    unset WIFI_PIN
+    unset SCREEN_PIN
     echo "   PIN saved in $DEST/config.json (readable by anyone with a shell on this Pi)."
   else
-    echo "   Keeping the wifi_pin already in $DEST/config.json."
+    echo "   Keeping the PIN already in $DEST/config.json."
   fi
 fi
 

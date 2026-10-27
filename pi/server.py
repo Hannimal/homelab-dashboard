@@ -40,7 +40,8 @@ DEFAULTS = {
     "hide_containers": ["glances-agent"],
     "expected_stopped": [],
     "alert_confirm_samples": 2,
-    "wifi_pin": "",
+    "pin": "",
+    "wifi_pin": "",   # older name for "pin"; still honoured
     "screen": {"idle_minutes": 0, "off_at": "", "on_at": "", "wake_seconds": 60,
                "wake_on_alert": False, "method": "auto"},
     "hosts": [],
@@ -552,11 +553,15 @@ class PiInfo:
 
 # --------------------------------------------------------------------------- Wi-Fi setup
 
-class WifiError(Exception):
+class ActionError(Exception):
+    """A refused or failed action, carrying the HTTP status and a message that is safe to show."""
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+WifiError = ActionError   # the name the Wi-Fi code and its tests use
 
 
 def split_nmcli(line):
@@ -626,32 +631,65 @@ DEMO_WIFI = [
 ]
 
 
-class WifiSetup:
-    """Scan and join Wi-Fi networks through NetworkManager (nmcli).
+class PinGate:
+    """The PIN in config.json, checked in constant time, with a lockout after repeated wrong tries.
 
-    Off until `wifi_pin` is set in the config. Every action needs that PIN, wrong
-    guesses lock the feature for a minute, and the HTTP layer only accepts requests
-    coming from the Pi itself. The password is handed to nmcli on stdin, never on
-    the command line, and is never logged.
+    One gate guards every on-screen action (Wi-Fi changes and the power menu), so the lockout is shared
+    and guesses can't be spread across features. With no PIN set, everything behind it stays off.
     """
     MAX_FAILS = 5
     LOCK_S = 60
     WINDOW_S = 300
-    SCAN_TIMEOUT_S = 20
 
     def __init__(self, get_cfg, demo=False):
         self.get_cfg = get_cfg
         self.demo = demo
         self.lock = threading.Lock()
-        self.busy = threading.Lock()
         self.fails = []
         self.locked_until = 0.0
 
     def configured_pin(self):
-        pin = str(self.get_cfg().get("wifi_pin") or "")
+        cfg = self.get_cfg()
+        pin = str(cfg.get("pin") or cfg.get("wifi_pin") or "")
         if self.demo and not pin:
             return "1234"
         return pin if len(pin) >= 4 else ""
+
+    def check(self, pin):
+        now = time.time()
+        with self.lock:
+            if now < self.locked_until:
+                raise ActionError(429, f"Too many wrong PINs. Try again in {int(self.locked_until - now) + 1} s.")
+            self.fails = [t for t in self.fails if now - t < self.WINDOW_S]
+            ok = isinstance(pin, str) and hmac.compare_digest(pin.encode(), self.configured_pin().encode())
+            if not ok:
+                self.fails.append(now)
+                log.warning("Wrong PIN entered on the screen (%d of %d)", len(self.fails), self.MAX_FAILS)
+                if len(self.fails) >= self.MAX_FAILS:
+                    self.locked_until = now + self.LOCK_S
+                    self.fails = []
+                raise ActionError(403, "Wrong PIN.")
+            self.fails = []
+
+
+class WifiSetup:
+    """Scan and join Wi-Fi networks through NetworkManager (nmcli).
+
+    Off until a PIN is set in the config. Every action needs that PIN, wrong
+    guesses lock the feature for a minute, and the HTTP layer only accepts requests
+    coming from the Pi itself. The password is handed to nmcli on stdin, never on
+    the command line, and is never logged.
+    """
+    MAX_FAILS = PinGate.MAX_FAILS
+    SCAN_TIMEOUT_S = 20
+
+    def __init__(self, get_cfg, demo=False, gate=None):
+        self.demo = demo
+        self.gate = gate or PinGate(get_cfg, demo)
+        self.busy = threading.Lock()
+
+    def configured_pin(self):
+        return self.gate.configured_pin()
 
     def status(self):
         """'ready', 'no_pin' (not configured) or 'no_nmcli' (NetworkManager missing)."""
@@ -664,21 +702,9 @@ class WifiSetup:
     def authorise(self, pin):
         state = self.status()
         if state != "ready":
-            raise WifiError(503, "Wi-Fi setup is not enabled." if state == "no_pin"
-                            else "NetworkManager (nmcli) is not installed.")
-        now = time.time()
-        with self.lock:
-            if now < self.locked_until:
-                raise WifiError(429, f"Too many wrong PINs. Try again in {int(self.locked_until - now) + 1} s.")
-            self.fails = [t for t in self.fails if now - t < self.WINDOW_S]
-            ok = isinstance(pin, str) and hmac.compare_digest(pin.encode(), self.configured_pin().encode())
-            if not ok:
-                self.fails.append(now)
-                if len(self.fails) >= self.MAX_FAILS:
-                    self.locked_until = now + self.LOCK_S
-                    self.fails = []
-                raise WifiError(403, "Wrong PIN.")
-            self.fails = []
+            raise ActionError(503, "Wi-Fi setup is not enabled." if state == "no_pin"
+                              else "NetworkManager (nmcli) is not installed.")
+        self.gate.check(pin)
 
     def scan(self):
         if self.demo:
@@ -723,6 +749,59 @@ class WifiSetup:
             self.busy.release()
 
 
+class PowerControl:
+    """Reboot, shut down or restart the dashboard from the screen, behind the same PIN as Wi-Fi setup.
+
+    The commands are fixed: nothing from a request is ever placed on a command line. They run as the
+    dashboard's own user, so they only work once install.sh --power has let that user do exactly these
+    things through polkit.
+    """
+    COMMANDS = {
+        "reboot": ["systemctl", "reboot"],
+        "shutdown": ["systemctl", "poweroff"],
+        "restart": ["systemctl", "restart", "--no-block", "homelab-dashboard.service"],
+    }
+
+    def __init__(self, gate, demo=False):
+        self.gate = gate
+        self.demo = demo
+
+    def status(self):
+        """'ready', 'no_pin' or 'no_systemctl'."""
+        if not self.gate.configured_pin():
+            return "no_pin"
+        if not self.demo and not shutil.which("systemctl"):
+            return "no_systemctl"
+        return "ready"
+
+    def run(self, pin, action):
+        state = self.status()
+        if state != "ready":
+            raise ActionError(503, "The power menu is not enabled." if state == "no_pin"
+                              else "systemctl is not available.")
+        self.gate.check(pin)
+        if action == "check":
+            return
+        if not isinstance(action, str) or action not in self.COMMANDS:
+            raise ActionError(400, "Unknown action.")
+        cmd = self.COMMANDS[action]
+        if self.demo:
+            log.info("demo: would run %s", " ".join(cmd))
+            return
+        log.warning("Power action '%s' requested from the screen", action)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            raise ActionError(504, "The request timed out.")
+        except OSError:
+            raise ActionError(503, "systemctl is not available.")
+        if r.returncode != 0:
+            msg = clean_nmcli_error(r.stderr or r.stdout)
+            if any(w in msg.lower() for w in ("authentication", "access denied", "not authorized", "permission")):
+                msg = "Not allowed yet. Re-run install.sh pi with --power on the Pi."
+            raise ActionError(502, msg)
+
+
 class ScreenState:
     """Whether the dashboard page says the screen is asleep.
 
@@ -757,7 +836,9 @@ class Collector:
         self.config_error = None
         self.streaks = {}
         self.pi = PiInfo(lambda: self.cfg["thresholds"], demo=demo)
-        self.wifi = WifiSetup(lambda: self.cfg, demo=demo)
+        gate = PinGate(lambda: self.cfg, demo=demo)
+        self.wifi = WifiSetup(lambda: self.cfg, demo=demo, gate=gate)
+        self.power = PowerControl(gate, demo=demo)
         self.screen = ScreenState()
         self.lock = threading.Lock()
         self.state = {"hosts": [], "alerts": [], "updated": None}
@@ -901,7 +982,8 @@ def make_handler(collector):
             if route == "/api/state":
                 return self.send_json(collector.snapshot())
             if route == "/api/pi":
-                return self.send_json({**collector.pi.snapshot(), "wifi_setup": collector.wifi.status()})
+                return self.send_json({**collector.pi.snapshot(), "wifi_setup": collector.wifi.status(),
+                                       "power_setup": collector.power.status()})
             if route == "/api/screen":
                 return self.send_json({"state": collector.screen.current(), "method": collector.cfg["screen"]["method"]})
             if self.path == "/healthz":
@@ -933,7 +1015,7 @@ def make_handler(collector):
 
         def do_POST(self):
             route = self.path.split("?")[0]
-            if route not in ("/api/wifi/scan", "/api/wifi/connect", "/api/screen"):
+            if route not in ("/api/wifi/scan", "/api/wifi/connect", "/api/screen", "/api/power"):
                 return self.send_json({"error": "Not found."}, 404)
             if not self.local_request():
                 return self.send_json({"error": "This only works on the Pi's own screen."}, 403)
@@ -945,6 +1027,12 @@ def make_handler(collector):
                     return self.send_json({"error": "state must be on or off."}, 400)
                 collector.screen.report(body["state"])
                 return self.send_json({"ok": True})
+            if route == "/api/power":
+                try:
+                    collector.power.run(body.get("pin"), body.get("action"))
+                    return self.send_json({"ok": True})
+                except ActionError as e:
+                    return self.send_json({"error": e.message}, e.status)
             wifi = collector.wifi
             try:
                 wifi.authorise(body.get("pin"))

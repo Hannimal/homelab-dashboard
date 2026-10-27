@@ -117,15 +117,29 @@ Off by default. To turn it on, install with `--wifi`:
 
 This needs **NetworkManager** (the default on Raspberry Pi OS Bookworm and newer; not on older Bullseye images). The installer then:
 
-1. asks you to choose a **PIN** (4 to 8 digits) and stores it as `wifi_pin` in `/opt/homelab-dashboard/config.json`,
+1. asks you to choose a **PIN** (4 to 8 digits) and stores it as `pin` in `/opt/homelab-dashboard/config.json` (the same PIN also protects the [power menu](#power-menu-reboot-shut-down-restart)),
 2. runs the dashboard service as a dedicated login-less user and installs one polkit rule (`/etc/polkit-1/rules.d/50-homelab-dashboard-wifi.rules`) that lets only that user scan for and join Wi-Fi networks. NetworkManager asks polkit before accepting a change, and this is what makes it say yes without root,
 3. installs `iw`, so the info panel can show the network name and signal.
 
 On the screen: **i → Wi-Fi settings → PIN → choose a network → type the password → Connect**. Hidden networks are under "Other network…". Open networks connect straight away. Wrong PINs lock the feature for a minute after five tries, and leaving the screen forgets the PIN and password.
 
-Without `--wifi` the panel just shows a hint that Wi-Fi changes are off. Ethernet is never touched, so a bad Wi-Fi change can't lock you out of SSH if the cable is plugged in.
+Without `--wifi` there is no Wi-Fi button. Ethernet is never touched, so a bad Wi-Fi change can't lock you out of SSH if the cable is plugged in.
 
 > **Not yet tested on real hardware.** The scan, connect and PIN logic is covered by unit tests with a fake NetworkManager, and the screen flow was checked in the built-in demo (`--demo` accepts PIN `1234`), but I haven't run the real `nmcli` path on a Pi. If connecting fails, run `journalctl -u homelab-dashboard -n 50` on the Pi and open an issue with the message.
+
+## Power menu: reboot, shut down, restart
+
+Off by default. To turn it on, install with `--power` (add `--wifi` too if you use that, and run the same flags on later updates; an update without flags keeps whatever you already enabled):
+
+```bash
+./install.sh pi --console --power
+```
+
+The installer asks for the **PIN** if none is set yet, runs the service as a dedicated login-less user, and installs one polkit rule (`/etc/polkit-1/rules.d/50-homelab-dashboard-power.rules`). That rule lets only that user reboot or power off the machine and restart the `homelab-dashboard` service, and nothing else.
+
+On the screen: **i → Power → PIN**, then choose **Reboot**, **Shut down**, **Restart dashboard** or **Reload this page**. Reboot, shut down and restart ask you to confirm first, so a stray tap can't do anything. After a shutdown the Pi stays off until you unplug and replug the power (or press its power button). "Restart dashboard" is handy after changing `listen` or `port`. "Reload this page" needs no permissions.
+
+Wrong PINs lock Wi-Fi settings and the power menu together for a minute after five tries. If a power action says "Not allowed yet", the polkit rule isn't installed: re-run the installer with `--power`. To remove the feature, delete that rules file and re-install without the flag.
 
 ## Turning the screen off on a timer
 
@@ -169,7 +183,7 @@ With `"method": "auto"` it tries them in that order and remembers the one that w
 | `hide_containers` | Containers never shown (the agent itself by default). |
 | `expected_stopped` | Containers that are allowed to be stopped, such as one-shot backup jobs, so they don't raise alerts. Also accepted inside a single host entry (`"expected_stopped": ["backup"]`) to apply to that host only. |
 | `screen` | Sleep schedule and idle timeout for the screen, see [Turning the screen off on a timer](#turning-the-screen-off-on-a-timer). |
-| `wifi_pin` | PIN that unlocks Wi-Fi changes on the screen (4+ characters; digits recommended). Empty means the feature is off. Set by `./install.sh pi --wifi`, or edit by hand. |
+| `pin` | The PIN that unlocks the on-screen controls: Wi-Fi settings and the power menu (4+ characters; digits recommended). Empty means they are off. Set by `./install.sh pi --wifi` or `--power`, or edit by hand. The older name `wifi_pin` still works. |
 | `alert_confirm_samples` | How many polls in a row a problem must last before it shows (default 2, about 10 s). Stops a value hovering at a threshold from flipping the screen back and forth. Set to 1 for instant alerts. |
 | `disk_mounts` (per host) | Limit which mount points count as disks, e.g. `["/", "/host/data"]`. |
 | `listen` / `port` | Where the Pi serves the page. Set `listen` to `"0.0.0.0"` to open the dashboard from your laptop too. |
@@ -214,6 +228,7 @@ This project is meant for a **trusted home network**. What that means in practic
 | Dashboard on the Pi (`:8080`) | Shows server names, IPs and container names, **no password** | Listens on `127.0.0.1` by default. Only set `listen` to `0.0.0.0` on a network you trust. Responses carry a strict Content-Security-Policy, `nosniff` and no-referrer headers, and all data is HTML-escaped in the page. |
 | Aggregator service | Polls the agents over plain HTTP | Runs as a throwaway user (`DynamicUser`) with no capabilities, a read-only filesystem, a private `/tmp` and only IP, local and netlink sockets allowed (netlink is how it reads network and Wi-Fi status). |
 | Screen sleep (`POST /api/screen`) | Lets the page tell the Pi to switch the display off. Worst case someone blanks your screen | Only accepts requests from the Pi itself, same checks as Wi-Fi setup. `screen-power.sh` runs a fixed list of display commands and never anything it receives over the network. A stale or unreachable state means "on". |
+| Power menu (opt-in, `--power`) | Can **reboot or power off the Pi** and restart the dashboard service. Worst case someone with the PIN switches it off | Same protections as Wi-Fi setup: off until a PIN is set, only requests from the Pi itself, shared lockout after five wrong PINs, and a confirm step on screen. The commands are a fixed list (`systemctl reboot`, `poweroff`, `restart` of its own unit), nothing from a request is ever put on a command line, and a polkit rule lets only the service user do exactly these things. Each use is logged to the journal. |
 | Wi-Fi changes (opt-in, `--wifi`) | The only part that can **change** anything. Anyone who gets past it could join the Pi to another network | Disabled until you set a PIN. Only accepts requests that come from the Pi itself (loopback address, matching `Host` and `Origin`, JSON only), so other machines on the LAN and DNS-rebinding web pages are refused even if you set `listen` to `0.0.0.0`. PIN is compared in constant time, with a one-minute lockout after five wrong tries. The password goes to NetworkManager on stdin, never on a command line, and is never logged. The service then runs as a fixed user that polkit lets scan and join networks (four NetworkManager actions, nothing else); the PIN is stored in plain text in `config.json`. |
 | `install.sh` | Runs repository code with `sudo` | Read it before running, pin `REPO_REF` to a release tag, or review changes after `git pull`. Tokens are never written into the clone's remote URL. |
 

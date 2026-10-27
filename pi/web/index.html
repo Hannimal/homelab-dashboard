@@ -119,7 +119,12 @@
   .net .dot { display: inline-block; margin-right: 6px; vertical-align: middle; }
 
   /* Wi-Fi setup: PIN pad, network list, touch keyboard */
-  #wifi { flex-direction: column; gap: 8px; padding-top: 10px; }
+  #wifi, #power { flex-direction: column; gap: 8px; padding-top: 10px; }
+  .btnrow { display: flex; gap: 8px; }
+  .btnrow .btn { flex: 1; height: 40px; }
+  .pmenu { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; max-width: 420px; }
+  .btn.big { height: 52px; font-size: 15px; }
+  .btn.danger { border-color: #7A3B36; background: #3A1F1D; }
   .wtitle { display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: 500; min-height: 36px; }
   .wtitle .btn { margin-left: 6px; }
   .field { height: 40px; border: 1px solid var(--line); border-radius: 6px; padding: 0 12px; display: flex; align-items: center;
@@ -168,6 +173,7 @@
     <section class="view" id="alerts"></section>
     <section class="view" id="info"></section>
     <section class="view" id="wifi"></section>
+    <section class="view" id="power"></section>
     <div class="statusline" id="statusline"><span class="msg" id="statusmsg"></span><span id="updated"></span></div>
   </main>
 
@@ -212,15 +218,17 @@
 
   // ---- navigation
   function show(v) {
-    if (v !== "info" && v !== "wifi") lastView = v;
+    if (v !== "info" && v !== "wifi" && v !== "power") lastView = v;
     if (v !== "wifi") wifiReset();   // never keep a typed PIN or password around
+    if (v !== "power") powerReset();
     view = v;
     if (v === "info") pollPi();
-    $("infoBtn").classList.toggle("on", v === "info" || v === "wifi");
+    $("infoBtn").classList.toggle("on", v === "info" || v === "wifi" || v === "power");
     document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === v));
     document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.view === v));
     $("statusline").style.display = v === "overview" ? "flex" : "none";
     if (v === "wifi") renderWifi();
+    if (v === "power") renderPower();
     render();
   }
   $("nav").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) show(b.dataset.view); });
@@ -356,7 +364,7 @@
     if (view === "overview") renderOverview();
     else if (view === "containers") renderContainers();
     else if (view === "info") renderInfo();
-    else if (view === "wifi") { /* drawn on touch only, so a periodic redraw never eats a keypress */ }
+    else if (view === "wifi" || view === "power") { /* drawn on touch only, so a periodic redraw never eats a keypress */ }
     else renderAlerts();
     const age = state.updated ? Math.round(Date.now() / 1000 - state.updated) : null;
     const stale = age != null && age > STALE_S;
@@ -381,7 +389,7 @@
     if (view === "info") renderInfo();
   }
   setInterval(() => { if (view === "info") pollPi(); }, POLL_MS);
-  $("infoBtn").addEventListener("click", () => show(view === "info" || view === "wifi" ? lastView : "info"));
+  $("infoBtn").addEventListener("click", () => show(["info", "wifi", "power"].includes(view) ? lastView : "info"));
 
   function netRow(n) {
     const wifiNet = n.kind === "wifi";
@@ -409,13 +417,20 @@
     ].join("");
     const power = p.power ? kv("Power", p.power.text, p.power.level === "ok" ? "" : "hl") : "";
     const nets = (p.network || []).map(netRow).join("") || `<div class="muted small">No network interfaces found.</div>`;
-    const setup = p.wifi_setup === "ready" ? `<button class="btn" data-act="wifi">Wi-Fi settings</button>`
-      : p.wifi_setup === "no_pin" ? `<div class="muted small">Wi-Fi changes are off. Set "wifi_pin" in config.json to enable them here.</div>` : "";
+    const buttons = [
+      p.wifi_setup === "ready" ? `<button class="btn" data-act="wifi">Wi-Fi settings</button>` : "",
+      p.power_setup === "ready" ? `<button class="btn" data-act="power">Power</button>` : "",
+    ].join("");
+    const setup = buttons ? `<div class="btnrow">${buttons}</div>`
+      : p.wifi_setup === "no_pin" ? `<div class="muted small">Wi-Fi and power controls are off. Set "pin" in config.json to enable them here.</div>` : "";
     el.innerHTML = `<div class="col"><h3>Hardware</h3><div class="metrics">${hw}</div>${power}</div>
       <div class="col"><h3>Network</h3><div>${nets}</div>${setup}
         <h3>System</h3>${kv("Host", p.hostname)}${kv("Model", p.model)}${kv("OS", p.os)}${kv("Uptime", p.uptime)}${kv("Load", p.load1 != null ? `${p.load1} · ${p.cores} cores` : null)}</div>`;
   }
-  $("info").addEventListener("click", (e) => { if (e.target.closest("[data-act=wifi]")) show("wifi"); });
+  $("info").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-act]");
+    if (b) show(b.dataset.act);
+  });
 
   // ---- Wi-Fi setup on the touchscreen (PIN pad, network list, keyboard)
   const KEYS = {
@@ -452,10 +467,7 @@
     const w = wifi, el = $("wifi"), back = `<button class="btn" data-w="back">Back</button>`;
     let html;
     if (w.step === "pin") {
-      const dots = w.busy ? "Checking the PIN and scanning for networks… (about 10 s)" : "●".repeat(w.pin.length) || "Enter the PIN";
-      html = `<div class="wtitle"><span>Wi-Fi settings</span>${back}</div><div class="field${w.pin && !w.busy ? "" : " ph"}">${dots}</div>` +
-        (w.msg ? `<div class="werr">${esc(w.msg)}</div>` : "") +
-        `<div class="pad">${"123456789".split("").map((n) => keyBtn(n)).join("")}${keyBtn("{bs}", "⌫")}${keyBtn("0")}${keyBtn("{ok}", "OK", "go")}</div>`;
+      html = pinHtml("Wi-Fi settings", back, w, "Checking the PIN and scanning for networks… (about 10 s)");
     } else if (w.step === "list" && w.busy) {
       html = `<div class="wtitle"><span>Choose a network</span></div>` +
         `<div class="empty">Scanning for networks…<br><span class="muted">This takes about 10 seconds.</span></div>`;
@@ -540,6 +552,94 @@
     }
     renderWifi();
   });
+  // ---- shared PIN pad (Wi-Fi settings and the power menu use the same PIN)
+  function pinHtml(title, backBtn, st, busyText) {
+    const dots = st.busy ? busyText : "●".repeat(st.pin.length) || "Enter the PIN";
+    return `<div class="wtitle"><span>${esc(title)}</span>${backBtn}</div><div class="field${st.pin && !st.busy ? "" : " ph"}">${dots}</div>` +
+      (st.msg ? `<div class="werr">${esc(st.msg)}</div>` : "") +
+      `<div class="pad">${"123456789".split("").map((n) => keyBtn(n)).join("")}${keyBtn("{bs}", "⌫")}${keyBtn("0")}${keyBtn("{ok}", "OK", "go")}</div>`;
+  }
+
+  // ---- power menu: reboot, shut down, restart the dashboard (PIN, then a confirm step)
+  const POWER_TEXT = {
+    reboot: { label: "Reboot", ask: "Reboot the Pi?", detail: "The dashboard will be unavailable for about a minute.",
+              done: "Rebooting. The screen goes dark and comes back in about a minute." },
+    shutdown: { label: "Shut down", ask: "Shut the Pi down?", detail: "To start it again, unplug and replug the power (or press its power button).",
+                done: "Shutting down. Wait about 10 seconds before unplugging." },
+    restart: { label: "Restart dashboard", ask: "Restart the dashboard service?", detail: "The screen reloads in a few seconds. Your servers are not affected.",
+               done: "Restarting. The page reloads in a moment." },
+  };
+  let power = null;
+  function powerReset() { power = { step: "pin", pin: "", msg: "", busy: false, action: "", ok: false }; }
+  powerReset();
+
+  async function powerApi(action) {
+    const r = await fetch("/api/power", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: power.pin, action }) });
+    let data = {};
+    try { data = await r.json(); } catch (e) { /* non-JSON error page */ }
+    if (!r.ok) throw new Error(data.error || `Error ${r.status}`);
+    return data;
+  }
+
+  function renderPower() {
+    const p = power, el = $("power"), back = `<button class="btn" data-p="back">Back</button>`;
+    let html;
+    if (p.step === "pin") html = pinHtml("Power", back, p, "Checking the PIN…");
+    else if (p.step === "menu") {
+      html = `<div class="wtitle"><span>Power</span>${back}</div><div class="pmenu">` +
+        ["reboot", "shutdown", "restart"].map((a) => `<button class="btn big" data-p="ask" data-a="${a}">${esc(POWER_TEXT[a].label)}</button>`).join("") +
+        `<button class="btn big" data-p="reload">Reload this page</button></div>`;
+    } else if (p.step === "confirm") {
+      const t = POWER_TEXT[p.action];
+      html = `<div class="wtitle"><span>${esc(t.ask)}</span></div><div class="muted">${esc(t.detail)}</div>` +
+        `<div class="pmenu"><button class="btn big danger" data-p="do">${esc(t.label)}</button><button class="btn big" data-p="menu">Cancel</button></div>`;
+    } else if (p.step === "working") html = `<div class="empty">${esc(POWER_TEXT[p.action].label)}…</div>`;
+    else html = p.ok ? `<div class="empty">${esc(POWER_TEXT[p.action].done)}</div>`
+      : `<div class="empty"><span class="werr">${esc(p.msg)}</span><br><br><button class="btn" data-p="menu">Back to menu</button></div>`;
+    el.innerHTML = html;
+  }
+
+  async function powerCheck() {
+    power.busy = true; power.msg = ""; renderPower();
+    try { await powerApi("check"); power.step = "menu"; }
+    catch (e) { power.msg = e.message; power.pin = ""; }
+    power.busy = false; renderPower();
+  }
+
+  async function powerRun(action) {
+    if (power.step === "working") return;
+    power.step = "working"; power.action = action; renderPower();
+    try { await powerApi(action); power.ok = true; power.msg = ""; }
+    catch (e) {
+      // restarting the service kills the connection before it can answer: that is success
+      power.ok = action === "restart" && e instanceof TypeError;
+      power.msg = e.message;
+    }
+    power.step = "done"; renderPower();
+    if (power.ok && action === "restart") setTimeout(() => location.reload(), 6000);
+  }
+
+  $("power").addEventListener("click", (e) => {
+    const key = e.target.closest("[data-k]");
+    if (key) {
+      const k = key.dataset.k;
+      if (power.busy || power.step !== "pin") return;
+      if (k === "{bs}") power.pin = power.pin.slice(0, -1);
+      else if (k === "{ok}") { if (power.pin.length >= 4) return powerCheck(); }
+      else if (/^\d$/.test(k) && power.pin.length < 8) power.pin += k;
+      return renderPower();
+    }
+    const b = e.target.closest("[data-p]");
+    if (!b || power.busy) return;
+    const act = b.dataset.p;
+    if (act === "back") return show("info");
+    if (act === "reload") return location.reload();
+    if (act === "do") return powerRun(power.action);
+    if (act === "menu") power.step = "menu";
+    else if (act === "ask") { power.action = b.dataset.a; power.step = "confirm"; }
+    renderPower();
+  });
+
   async function poll() {
     try {
       const r = await fetch("/api/state", { cache: "no-store" });
@@ -557,7 +657,7 @@
   poll();
   // Optional deep link (e.g. http://pi:8080/#alerts), handy for screenshots
   const startView = location.hash.slice(1);
-  show(["containers", "alerts", "info", "wifi"].includes(startView) ? startView : "overview");
+  show(["containers", "alerts", "info", "wifi", "power"].includes(startView) ? startView : "overview");
 })();
 </script>
 </body>
