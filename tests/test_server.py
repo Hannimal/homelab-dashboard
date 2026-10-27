@@ -183,6 +183,24 @@ class Collect(unittest.TestCase):
         self.assertEqual([c["name"] for c in h["containers"]], ["db", "web"])  # agent hidden, problems first
         self.assertEqual((h["running"], h["total"]), (1, 2))
 
+    def test_health_states_are_not_treated_as_problems(self):
+        containers = [
+            {"name": "plain", "status": "running", "cpu_percent": 1.0, "memory_usage": 1024 ** 2, "uptime": "1 day"},
+            {"name": "ok", "status": "healthy", "cpu_percent": 2.0, "memory_usage": 1024 ** 2, "uptime": "1 day"},
+            {"name": "booting", "status": "starting", "cpu_percent": 0.5, "memory_usage": 1024 ** 2, "uptime": "5 seconds"},
+            {"name": "sick", "status": "unhealthy", "cpu_percent": 9.0, "memory_usage": 1024 ** 2, "uptime": "1 day"},
+            {"name": "never-ran", "status": "created"},
+        ]
+        h = self.collect({**self.PAYLOAD, "containers": containers})
+        by_name = {c["name"]: c for c in h["containers"]}
+        self.assertEqual([by_name[n]["status"] for n in ("plain", "ok", "booting", "sick", "never-ran")],
+                         ["running", "running", "running", "unhealthy", "created"])
+        self.assertEqual(by_name["sick"]["cpu"], "9.0%")      # an unhealthy container is still running
+        self.assertEqual((h["running"], h["total"]), (4, 5))
+        h = server.evaluate(h, cfg())
+        self.assertEqual(sorted(a["text"] for a in h["alerts"]), ["never-ran is created", "sick is unhealthy"])
+        self.assertEqual(h["containers"][0]["name"], "sick")   # problems sort first
+
     def test_optional_plugin_failure_keeps_host_online(self):
         h = self.collect({**self.PAYLOAD, "sensors": KeyError})
         self.assertTrue(h["online"])

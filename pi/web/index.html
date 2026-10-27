@@ -338,7 +338,7 @@
     if (!h || !h.online) { rows.innerHTML = `<div class="empty">No data from ${esc(selectedHost)}.</div>`; return; }
     if (!h.containers.length) { rows.innerHTML = `<div class="empty">No containers reported on this host.</div>`; return; }
     rows.innerHTML = h.containers.map((c) => {
-      const cls = c.status === "running" ? "" : (c.status === "restarting" || c.status === "dead" || c.status === "exited") ? "warn" : "off";
+      const cls = c.status === "running" ? "" : (c.status === "restarting" || c.status === "dead" || c.status === "exited" || c.status === "unhealthy") ? "warn" : "off";
       return `<div class="tr"><span>${esc(c.name)}</span>` +
         `<span class="st ${cls === "warn" ? "warn" : ""}"><span class="dot ${cls}"></span>${esc(c.status)}</span>` +
         `<span class="r">${esc(c.cpu)}</span><span class="r">${esc(c.mem)}</span><span class="r up">${esc(c.uptime)}</span></div>`;

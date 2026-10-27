@@ -235,7 +235,11 @@ def collect_host(host, cfg):
         if name in hide:
             continue
         status = (c.get("status") or "unknown").lower()
-        running = status == "running"
+        # Glances shows the Docker health state INSTEAD of "running" for containers that have a
+        # healthcheck. Healthy and still-starting ones are running normally; "unhealthy" is a real problem.
+        if status in ("healthy", "starting"):
+            status = "running"
+        running = status in ("running", "unhealthy")
         containers.append({
             "name": name,
             "status": status,
@@ -243,10 +247,10 @@ def collect_host(host, cfg):
             "mem": human_bytes(c.get("memory_usage")) if running and c.get("memory_usage") else "—",
             "uptime": short_uptime(c.get("uptime")) if running or status == "restarting" else "—",
         })
-    order = {"restarting": 0, "dead": 0, "exited": 1, "paused": 2, "created": 3, "running": 4}
+    order = {"restarting": 0, "dead": 0, "unhealthy": 0, "exited": 1, "paused": 2, "created": 3, "running": 4}
     containers.sort(key=lambda c: (order.get(c["status"], 1), c["name"]))
     out["containers"] = containers
-    out["running"] = sum(1 for c in containers if c["status"] == "running")
+    out["running"] = sum(1 for c in containers if c["status"] in ("running", "unhealthy"))
     out["total"] = len(containers)
     return out
 
