@@ -1,0 +1,22 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8080,
+  "poll_seconds": 5,
+  "timeout_seconds": 3,
+
+  "hosts": [
+    { "name": "node-01", "address": "192.168.1.11" },
+    { "name": "node-02", "address": "192.168.1.12" },
+    { "name": "node-03", "address": "192.168.1.13", "disk_mounts": [] }
+  ],
+
+  "thresholds": {
+    "cpu_warn": 90,
+    "mem_warn": 90,
+    "disk_warn": 85,
+    "temp_warn": 80
+  },
+
+  "hide_containers": ["glances-agent"],
+  "expected_stopped": []
+}

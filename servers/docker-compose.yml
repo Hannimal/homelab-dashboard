@@ -1,0 +1,17 @@
+# Glances agent: exposes this host's system + Docker stats as a read-only JSON API on :61208
+services:
+  glances:
+    image: nicolargo/glances:latest
+    container_name: glances-agent
+    restart: unless-stopped
+    pid: host                # see host processes, not just the container's
+    network_mode: host       # report real host network interfaces
+    environment:
+      - GLANCES_OPT=-w --disable-webui -C /glances/conf/glances.conf
+      - TZ=${TZ:-Etc/UTC}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # container list + stats
+      - /etc/os-release:/etc/os-release:ro             # correct OS name
+      - ./glances.conf:/glances/conf/glances.conf:ro
+      # Optional: expose extra host disks so their usage is reported, e.g.
+      # - /mnt/data:/host/data:ro

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Lab</title>
+<style>
+  :root {
+    --bg: #0B0C0E; --text: #EDEDED; --muted: #8B8F96; --line: #1F2226; --line-soft: #17191C;
+    --ok: #6FBF9F; --warn: #E5A54B; --off: #5A5E64; --down: #E2685C;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  body {
+    color: var(--text); font-family: Inter, "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased;
+    cursor: none; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  /* The layout is designed at 800x480 and scaled to whatever the screen is */
+  #stage { width: 800px; height: 480px; transform-origin: 0 0; position: absolute; top: 0; left: 0;
+           padding: 18px 24px 0; display: flex; flex-direction: column; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: none; }
+
+  header { display: flex; align-items: baseline; justify-content: space-between;
+           padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+  header .title { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+  header .sub { font-size: 12px; color: var(--muted); margin-left: 14px; }
+  header .clock { font-size: 22px; font-weight: 300; letter-spacing: .02em; }
+  header .right { display: flex; align-items: center; gap: 4px; }
+
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .view { display: none; flex: 1; min-height: 0; }
+  .view.active { display: flex; }
+
+  /* Overview */
+  #overview { display: none; }
+  #overview.active { display: grid; }
+  .host { padding: 18px 20px 14px; display: flex; flex-direction: column; gap: 14px;
+          border-right: 1px solid var(--line); text-align: left; min-width: 0; }
+  .host:first-child { padding-left: 0; }
+  .host:last-child { padding-right: 0; border-right: 0; }
+  .host .top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .host .name { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .state { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
+  .warn .dot, .dot.warn { background: var(--warn); }
+  .down .dot, .dot.down { background: var(--down); }
+  .dot.off { background: var(--off); }
+  .state.warn { color: var(--warn); }
+  .state.down { color: var(--down); }
+  .big { font-size: 40px; font-weight: 300; line-height: 1; }
+  .big small { font-size: 18px; color: var(--muted); }
+  .caption { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .metrics { display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
+  .metric .row { display: flex; justify-content: space-between; gap: 8px; }
+  .metric .row span:first-child { color: var(--muted); }
+  .bar { height: 2px; background: var(--line); margin-top: 5px; }
+  .bar i { display: block; height: 2px; background: var(--text); }
+  .metric.hot .row span:last-child { color: var(--warn); }
+  .metric.hot .bar i { background: var(--warn); }
+  .foot { margin-top: auto; display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .foot b { font-weight: 400; color: var(--text); }
+  .offline { margin: auto 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  .statusline { padding: 10px 0; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted);
+                display: flex; justify-content: space-between; gap: 16px; white-space: nowrap; }
+  .statusline .msg { overflow: hidden; text-overflow: ellipsis; }
+  .statusline .hl { color: var(--warn); }
+  .statusline .bad { color: var(--down); }
+
+  /* Containers */
+  #containers { flex-direction: column; }
+  .pills { display: flex; gap: 4px; }
+  .pill { height: 40px; padding: 0 14px; border-radius: 6px; border: 1px solid transparent;
+          font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .pill.on { border-color: #3A3E44; background: #1A1C20; color: var(--text); font-weight: 500; }
+  .table { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .thead, .tr { display: grid; grid-template-columns: 2.4fr 1.2fr .8fr 1fr .8fr; gap: 8px; align-items: center; }
+  .thead { padding: 10px 0 8px; font-size: 11px; color: var(--muted); }
+  .tbody { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; }
+  .tbody::-webkit-scrollbar { display: none; }
+  .tr { height: 31px; font-size: 13px; border-top: 1px solid var(--line-soft); }
+  .tr > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r { text-align: right; }
+  .tr .st { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .tr .st.warn { color: var(--warn); }
+  .tr .up { color: var(--muted); }
+  .empty { margin: auto; font-size: 13px; color: var(--muted); text-align: center; line-height: 1.6; }
+
+  /* Alerts */
+  #alerts { flex-direction: column; }
+  .alert { display: grid; grid-template-columns: 14px 110px 1fr; align-items: center; gap: 10px;
+           height: 40px; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
+  .alert .h { color: var(--muted); }
+  .alert:first-child { margin-top: 6px; }
+
+  nav { height: 46px; flex: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+        border-top: 1px solid var(--line); margin: 0 -24px; padding: 0 24px; }
+  nav button { font-size: 13px; color: var(--muted); }
+  nav button.on { color: var(--text); font-weight: 500; box-shadow: inset 0 2px 0 var(--text); }
+  nav .count { color: var(--warn); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <header>
+    <div><span class="title">Home Lab</span><span class="sub" id="summary">Connecting…</span></div>
+    <div class="right" id="headerRight"><span class="clock" id="clock"></span></div>
+  </header>
+
+  <main>
+    <section class="view" id="overview"></section>
+    <section class="view" id="containers">
+      <div class="table">
+        <div class="thead"><span>Name</span><span>State</span><span class="r">CPU</span><span class="r">Memory</span><span class="r">Uptime</span></div>
+        <div class="tbody" id="rows"></div>
+      </div>
+    </section>
+    <section class="view" id="alerts"></section>
+    <div class="statusline" id="statusline"><span class="msg" id="statusmsg"></span><span id="updated"></span></div>
+  </main>
+
+  <nav id="nav">
+    <button data-view="overview" class="on">Overview</button>
+    <button data-view="containers">Containers</button>
+    <button data-view="alerts" id="alertsTab">Alerts</button>
+  </nav>
+</div>
+
+<script>
+(() => {
+  const POLL_MS = 5000;
+  const IDLE_RETURN_MS = 90000;   // go back to Overview after 90 s without a touch
+  const STALE_S = 30;
+
+  let state = null, view = "overview", selectedHost = null, lastTouch = Date.now(), fetchError = false;
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const gb = (b) => b == null ? "—" : (b / 1024 ** 3).toFixed(1);
+
+  // ---- scale the 800x480 layout to the actual screen
+  function fit() {
+    const s = Math.min(innerWidth / 800, innerHeight / 480);
+    const st = $("stage");
+    st.style.transform = `scale(${s})`;
+    st.style.left = `${(innerWidth - 800 * s) / 2}px`;
+    st.style.top = `${(innerHeight - 480 * s) / 2}px`;
+  }
+  addEventListener("resize", fit); fit();
+
+  // ---- clock
+  function tick() {
+    const d = new Date(), el = $("clock");
+    if (!el) return;
+    el.textContent = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+  setInterval(tick, 1000); tick();
+
+  // ---- navigation
+  function show(v) {
+    view = v;
+    document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === v));
+    document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.view === v));
+    $("statusline").style.display = v === "overview" ? "flex" : "none";
+    render();
+  }
+  $("nav").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) show(b.dataset.view); });
+  document.addEventListener("pointerdown", () => { lastTouch = Date.now(); }, true);
+  setInterval(() => { if (view !== "overview" && Date.now() - lastTouch > IDLE_RETURN_MS) show("overview"); }, 5000);
+
+  $("overview").addEventListener("click", (e) => {
+    const h = e.target.closest(".host");
+    if (h) { selectedHost = h.dataset.host; show("containers"); }
+  });
+  $("headerRight").addEventListener("click", (e) => {
+    const p = e.target.closest(".pill");
+    if (p) { selectedHost = p.dataset.host; render(); $("rows").scrollTop = 0; }
+  });
+
+  // ---- rendering
+  const stateLabel = { ok: "Healthy", warn: "Attention", down: "Offline" };
+
+  function metric(label, value, pct, hot) {
+    return `<div class="metric${hot ? " hot" : ""}"><div class="row"><span>${esc(label)}</span><span>${esc(value)}</span></div>` +
+           `<div class="bar"><i style="width:${Math.max(0, Math.min(100, pct || 0))}%"></i></div></div>`;
+  }
+
+  function renderOverview() {
+    const el = $("overview");
+    el.style.gridTemplateColumns = `repeat(${Math.max(1, state.hosts.length)}, minmax(0, 1fr))`;
+    el.innerHTML = state.hosts.map((h) => {
+      const head = `<div class="top"><span class="name">${esc(h.name)}</span>` +
+                   `<span class="state ${h.status === "ok" ? "" : h.status}"><span class="dot"></span>${stateLabel[h.status]}</span></div>`;
+      if (!h.online) {
+        return `<button class="host down" data-host="${esc(h.name)}">${head}<div class="offline">The agent at ${esc(h.address)} is not responding.<br>Check that the server is on and the glances-agent container is running.</div></button>`;
+      }
+      const disk = (h.disks && h.disks[0]) || null;
+      const hotDisk = disk && h.alerts.some((a) => a.text.startsWith(`Disk ${disk.mount} `));
+      const hotMem = h.alerts.some((a) => a.text.startsWith("Memory"));
+      const tempTxt = h.temp != null ? `<span><b>${h.temp}°</b> C</span>` : "<span></span>";
+      const ctr = h.running === h.total ? `<b>${h.total}</b> containers` : `<b>${h.running}</b> of ${h.total} containers`;
+      return `<button class="host" data-host="${esc(h.name)}">${head}
+        <div><div class="big">${Math.round(h.cpu)}<small>%</small></div><div class="caption">CPU${h.uptime ? " · up " + esc(h.uptime) : ""}</div></div>
+        <div class="metrics">
+          ${metric("Memory", `${gb(h.mem_used)} / ${Math.round(h.mem_total / 1024 ** 3)} GB`, h.mem_pct, hotMem)}
+          ${disk ? metric(disk.mount === "/" ? "Disk" : "Disk " + disk.mount, `${Math.round(disk.pct)}%`, disk.pct, hotDisk) : ""}
+        </div>
+        <div class="foot"><span>${ctr}</span>${tempTxt}</div></button>`;
+    }).join("");
+
+    const msg = $("statusmsg");
+    if (state.config_error) {
+      msg.innerHTML = `<span class="bad">${esc(state.config_error)}</span>`;
+    } else if (fetchError) {
+      msg.innerHTML = `<span class="bad">Can't reach the dashboard service.</span> Check: systemctl status homelab-dashboard`;
+    } else if (state.alerts.length) {
+      const a = state.alerts[0];
+      const more = state.alerts.length > 1 ? ` · ${state.alerts.length - 1} more in Alerts` : "";
+      msg.innerHTML = `<span class="${a.level === "down" ? "bad" : "hl"}">${esc(a.host)}</span> · ${esc(a.text)}${more}`;
+    } else {
+      msg.textContent = "All systems normal";
+    }
+  }
+
+  function renderContainers() {
+    const hosts = state.hosts;
+    if (!selectedHost || !hosts.find((h) => h.name === selectedHost)) {
+      selectedHost = (hosts.find((h) => h.status !== "ok") || hosts[0] || {}).name;
+    }
+    $("headerRight").innerHTML = `<div class="pills">` + hosts.map((h) =>
+      `<button class="pill${h.name === selectedHost ? " on" : ""}" data-host="${esc(h.name)}">${esc(h.name)}<span class="dot ${h.status === "ok" ? "" : h.status}"></span></button>`).join("") + `</div>`;
+    const h = hosts.find((x) => x.name === selectedHost);
+    $("summary").textContent = h && h.online ? `${h.running} of ${h.total} running` : "Offline";
+    const rows = $("rows");
+    if (!h || !h.online) { rows.innerHTML = `<div class="empty">No data from ${esc(selectedHost)}.</div>`; return; }
+    if (!h.containers.length) { rows.innerHTML = `<div class="empty">No containers reported on this host.</div>`; return; }
+    rows.innerHTML = h.containers.map((c) => {
+      const cls = c.status === "running" ? "" : (c.status === "restarting" || c.status === "dead" || c.status === "exited") ? "warn" : "off";
+      return `<div class="tr"><span>${esc(c.name)}</span>` +
+        `<span class="st ${cls === "warn" ? "warn" : ""}"><span class="dot ${cls}"></span>${esc(c.status)}</span>` +
+        `<span class="r">${esc(c.cpu)}</span><span class="r">${esc(c.mem)}</span><span class="r up">${esc(c.uptime)}</span></div>`;
+    }).join("");
+  }
+
+  function renderAlerts() {
+    const el = $("alerts");
+    if (!state.alerts.length) { el.innerHTML = `<div class="empty">All systems normal.<br>Nothing needs your attention.</div>`; return; }
+    el.innerHTML = state.alerts.map((a) =>
+      `<div class="alert"><span class="dot ${a.level}"></span><span class="h">${esc(a.host)}</span><span>${esc(a.text)}</span></div>`).join("");
+  }
+
+  function render() {
+    if (!state) return;
+    const s = state.summary;
+    if (view !== "containers") {
+      $("headerRight").innerHTML = `<span class="clock" id="clock"></span>`; tick();
+      $("summary").textContent = `${s.online} of ${s.hosts} hosts online · ${s.running} of ${s.total} containers running`;
+    }
+    const n = state.alerts.length;
+    $("alertsTab").innerHTML = n ? `Alerts <span class="count">${n}</span>` : "Alerts";
+    if (view === "overview") renderOverview();
+    else if (view === "containers") renderContainers();
+    else renderAlerts();
+    const age = state.updated ? Math.round(Date.now() / 1000 - state.updated) : null;
+    $("updated").innerHTML = age == null ? "" : age > STALE_S ? `<span class="hl">Data is ${age}s old</span>` : `Updated ${Math.max(0, age)}s ago`;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch("/api/state", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      state = await r.json();
+      fetchError = false;
+    } catch (e) {
+      fetchError = true;
+    }
+    render();
+  }
+  setInterval(poll, POLL_MS);
+  setInterval(render, 1000 * 5);
+  poll();
+  show("overview");
+})();
+</script>
+</body>
+</html>
