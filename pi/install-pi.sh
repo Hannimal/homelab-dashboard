@@ -6,22 +6,29 @@
 #   ./install-pi.sh           # install / update
 #   ./install-pi.sh --demo    # install, but show fake data (to test the screen)
 #   ./install-pi.sh --console # use the no-desktop kiosk even if a desktop is installed
+#   ./install-pi.sh --wifi    # let the screen's Wi-Fi settings change networks (needs NetworkManager)
 set -euo pipefail
 
 DEST=/opt/homelab-dashboard
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEMO_FLAG=""
 FORCE_CONSOLE=""
+WIFI=""
 for arg in "$@"; do
   case "$arg" in
     --demo) DEMO_FLAG=" --demo" ;;
     --console) FORCE_CONSOLE=1 ;;   # no-desktop kiosk even if a desktop is installed
-    *) echo "Unknown option: $arg (use --demo and/or --console)" >&2; exit 1 ;;
+    --wifi) WIFI=1 ;;
+    *) echo "Unknown option: $arg (use --demo, --console and/or --wifi)" >&2; exit 1 ;;
   esac
 done
 
 if [ "$(id -u)" -eq 0 ]; then
   echo "Run this as your normal desktop user, without sudo." >&2; exit 1
+fi
+if [ -n "$WIFI" ] && ! command -v nmcli >/dev/null; then
+  echo "--wifi needs NetworkManager (nmcli), which this system does not have." >&2
+  echo "Raspberry Pi OS Bookworm and newer include it." >&2; exit 1
 fi
 
 echo "==> Installing packages"
@@ -35,6 +42,7 @@ if [ -n "$FORCE_CONSOLE" ] || { ! command -v labwc >/dev/null && ! command -v wa
   echo "   No desktop found - installing the minimal kiosk mode (cage + Chromium)"
 fi
 sudo apt-get install -y -qq --no-install-recommends python3 curl "$BROWSER_PKG" ${HEADLESS:+cage}
+sudo apt-get install -y -qq iw 2>/dev/null || echo "   (iw not available; the info panel will show less Wi-Fi detail)"
 sudo apt-get install -y -qq fonts-inter 2>/dev/null || echo "   (fonts-inter not available; using the system font)"
 
 echo "==> Copying files to $DEST"
@@ -51,6 +59,37 @@ elif [ ! -f "$DEST/config.json" ]; then
 fi
 python3 -c "import json;json.load(open('$DEST/config.json'))" || { echo "config.json is not valid JSON" >&2; exit 1; }
 
+RUN_AS="DynamicUser=yes"
+if [ -n "$WIFI" ]; then
+  echo "==> Enabling Wi-Fi changes from the screen"
+  # NetworkManager's polkit rules trust members of netdev by their account, which a
+  # DynamicUser does not have, so the service gets a fixed, login-less account.
+  id -u homelab-dashboard >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin homelab-dashboard
+  sudo usermod -aG netdev homelab-dashboard
+  RUN_AS="User=homelab-dashboard"
+  HAVE_PIN="$(python3 -c "import json;print(len(str(json.load(open('$DEST/config.json')).get('wifi_pin') or '')))")"
+  if [ "$HAVE_PIN" -lt 4 ]; then
+    while :; do
+      read -r -s -p "   Choose a PIN (4-8 digits) to protect Wi-Fi changes on the screen: " WIFI_PIN; echo
+      case "$WIFI_PIN" in
+        ''|*[!0-9]*) echo "   Digits only." ;;
+        *) if [ "${#WIFI_PIN}" -ge 4 ] && [ "${#WIFI_PIN}" -le 8 ]; then break; fi; echo "   4 to 8 digits." ;;
+      esac
+    done
+    sudo WIFI_PIN="$WIFI_PIN" python3 - "$DEST/config.json" << 'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+cfg = json.load(open(path))
+cfg["wifi_pin"] = os.environ["WIFI_PIN"]
+json.dump(cfg, open(path, "w"), indent=2)
+PYEOF
+    unset WIFI_PIN
+    echo "   PIN saved in $DEST/config.json (readable by anyone with a shell on this Pi)."
+  else
+    echo "   Keeping the wifi_pin already in $DEST/config.json."
+  fi
+fi
+
 echo "==> Creating the homelab-dashboard service"
 sudo tee /etc/systemd/system/homelab-dashboard.service >/dev/null << EOF
 [Unit]
@@ -62,14 +101,14 @@ Wants=network-online.target
 ExecStart=/usr/bin/python3 $DEST/server.py --config $DEST/config.json$DEMO_FLAG
 Restart=always
 RestartSec=5
-DynamicUser=yes
+$RUN_AS
 ProtectSystem=strict
 ProtectHome=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 CapabilityBoundingSet=
 
 [Install]

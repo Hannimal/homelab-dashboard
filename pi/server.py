@@ -13,11 +13,15 @@ Standard library only - no pip installs needed.
 """
 
 import argparse
+import glob
+import hmac
 import json
 import logging
 import os
 import random
 import re
+import shutil
+import subprocess
 import threading
 import time
 import urllib.request
@@ -36,6 +40,7 @@ DEFAULTS = {
     "hide_containers": ["glances-agent"],
     "expected_stopped": [],
     "alert_confirm_samples": 2,
+    "wifi_pin": "",
     "hosts": [],
 }
 
@@ -284,6 +289,403 @@ def debounce(hosts, streaks, confirm):
     return hosts
 
 
+# --------------------------------------------------------------------------- the Pi itself
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def read_number(path):
+    try:
+        return float(read_text(path))
+    except (TypeError, ValueError):
+        return None
+
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def parse_cpu_stat(text):
+    """(busy, total) jiffies from the first line of /proc/stat, or None."""
+    try:
+        parts = [int(x) for x in text.splitlines()[0].split()[1:9]]
+        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+    except (AttributeError, IndexError, ValueError):
+        return None
+    total = sum(parts)
+    return total - idle, total
+
+
+def parse_meminfo(text):
+    """(used, total) bytes from /proc/meminfo; 'used' means not available."""
+    vals = {}
+    for line in (text or "").splitlines():
+        key, _, rest = line.partition(":")
+        m = re.match(r"\s*(\d+)", rest)
+        if m:
+            vals[key] = int(m.group(1)) * 1024
+    if "MemTotal" not in vals or "MemAvailable" not in vals:
+        return None
+    return vals["MemTotal"] - vals["MemAvailable"], vals["MemTotal"]
+
+
+def parse_ip_addr(text):
+    """{interface: ipv4} from `ip -4 -o addr show` (first address wins)."""
+    out = {}
+    for line in (text or "").splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[2] == "inet":
+            out.setdefault(f[1], f[3].split("/")[0])
+    return out
+
+
+def parse_iw_link(text):
+    """SSID, signal (dBm) and bitrate (Mbit/s) from `iw dev X link`; None when not connected."""
+    if not text or "Not connected" in text:
+        return None
+    ssid = re.search(r"SSID:\s*(.+)", text)
+    sig = re.search(r"signal:\s*(-?\d+)", text)
+    rate = re.search(r"tx bitrate:\s*([\d.]+)", text)
+    return {"ssid": ssid.group(1).strip() if ssid else None,
+            "signal": int(sig.group(1)) if sig else None,
+            "bitrate": round(float(rate.group(1))) if rate else None}
+
+
+def parse_proc_wireless(text):
+    """{interface: signal dBm} from /proc/net/wireless (drivers that report dBm only)."""
+    out = {}
+    for line in (text or "").splitlines()[2:]:
+        name, _, rest = line.partition(":")
+        f = rest.split()
+        if len(f) >= 3:
+            try:
+                level = float(f[2].rstrip("."))
+            except ValueError:
+                continue
+            if level < 0:
+                out[name.strip()] = round(level)
+    return out
+
+
+def power_status(value):
+    """Interpret the Pi firmware's get_throttled bit field -> (level, text), or None."""
+    if value is None:
+        return None
+    now = [label for bit, label in ((0x1, "under-voltage"), (0x2, "frequency capped"),
+                                    (0x4, "throttled"), (0x8, "temperature limit")) if value & bit]
+    if now:
+        return "warn", "Now: " + ", ".join(now)
+    if value & 0xF0000:
+        return "note", "OK now, issues since boot"
+    return "ok", "OK"
+
+
+def read_fan():
+    """{'rpm', 'pct'} for the first fan the kernel exposes, or None."""
+    for hw in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        rpm = read_number(f"{hw}/fan1_input")
+        if rpm is not None:
+            pwm = read_number(f"{hw}/pwm1")
+            return {"rpm": int(rpm), "pct": round(pwm / 255 * 100) if pwm is not None else None}
+    for dev in sorted(glob.glob("/sys/class/thermal/cooling_device*")):
+        if "fan" in (read_text(f"{dev}/type") or "").lower():
+            cur, top = read_number(f"{dev}/cur_state"), read_number(f"{dev}/max_state")
+            if cur is not None and top:
+                return {"rpm": None, "pct": round(cur / top * 100)}
+    return None
+
+
+def read_network():
+    """Ethernet and Wi-Fi interfaces with link state, address and signal."""
+    ips = parse_ip_addr(run(["ip", "-4", "-o", "addr", "show"]))
+    signals = parse_proc_wireless(read_text("/proc/net/wireless"))
+    nets = []
+    for path in sorted(glob.glob("/sys/class/net/*")):
+        name = os.path.basename(path)
+        wifi = os.path.isdir(f"{path}/wireless")
+        if not wifi and not re.match(r"(eth|en)", name):
+            continue
+        up = read_text(f"{path}/operstate") == "up"
+        net = {"name": name, "kind": "wifi" if wifi else "ethernet", "up": up, "ip": ips.get(name)}
+        if wifi:
+            link = (parse_iw_link(run(["iw", "dev", name, "link"])) if up else None) or {}
+            net["ssid"] = link.get("ssid")
+            net["signal"] = link.get("signal", signals.get(name) if up else None)
+            net["bitrate"] = link.get("bitrate")
+        else:
+            speed = read_number(f"{path}/speed")
+            net["speed"] = int(speed) if up and speed and speed > 0 else None
+        nets.append(net)
+    return nets
+
+
+def read_throttled():
+    paths = ["/sys/devices/platform/soc/soc:firmware/get_throttled"] + \
+        glob.glob("/sys/devices/platform/*/*firmware*/get_throttled")
+    for path in paths:
+        text = read_text(path)
+        if text:
+            try:
+                return int(text, 16)
+            except ValueError:
+                pass
+    return None
+
+
+class PiInfo:
+    """Facts about the Pi that runs the dashboard (not the monitored servers)."""
+    CACHE_S = 4
+
+    def __init__(self, thresholds, demo=False):
+        self.thresholds = thresholds
+        self.demo = demo
+        self.lock = threading.Lock()
+        self.cpu_prev = None
+        self.cpu_pct = None
+        self.cache = (0.0, None)
+
+    def sample_cpu(self):
+        """Called every poll so CPU % is measured over a few seconds, not since boot."""
+        cur = parse_cpu_stat(read_text("/proc/stat"))
+        with self.lock:
+            if cur and self.cpu_prev and cur[1] > self.cpu_prev[1]:
+                self.cpu_pct = round(100 * (cur[0] - self.cpu_prev[0]) / (cur[1] - self.cpu_prev[1]), 1)
+            if cur:
+                self.cpu_prev = cur
+
+    def snapshot(self):
+        now = time.time()
+        with self.lock:
+            stamp, data = self.cache
+            if data is not None and now - stamp < self.CACHE_S:
+                return data
+            cpu_pct = self.cpu_pct
+        data = self.demo_data() if self.demo else self.gather(cpu_pct)
+        data["thresholds"] = dict(self.thresholds())
+        with self.lock:
+            self.cache = (now, data)
+        return data
+
+    def gather(self, cpu_pct):
+        mem = parse_meminfo(read_text("/proc/meminfo"))
+        try:
+            du = shutil.disk_usage("/")
+            disk = {"used": du.used, "total": du.total, "pct": round(du.used / du.total * 100, 1)}
+        except OSError:
+            disk = None
+        temp = read_number("/sys/class/thermal/thermal_zone0/temp")
+        freq = read_number("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
+        up = (read_text("/proc/uptime") or "").split()
+        power = power_status(read_throttled())
+        os_name = next((l.split("=", 1)[1].strip('"') for l in (read_text("/etc/os-release") or "").splitlines()
+                        if l.startswith("PRETTY_NAME=")), None)
+        try:
+            load1 = round(os.getloadavg()[0], 2)
+        except OSError:
+            load1 = None
+        return {
+            "hostname": os.uname().nodename,
+            "model": (read_text("/proc/device-tree/model") or "").strip("\x00") or None,
+            "os": os_name,
+            "kernel": os.uname().release,
+            "uptime": human_uptime(int(float(up[0]))) if up else None,
+            "cpu": cpu_pct, "load1": load1, "cores": os.cpu_count(),
+            "mhz": round(freq / 1000) if freq else None,
+            "mem": {"used": mem[0], "total": mem[1], "pct": round(mem[0] / mem[1] * 100, 1)} if mem else None,
+            "disk": disk,
+            "temp": round(temp / 1000) if temp is not None else None,
+            "fan": read_fan(),
+            "power": {"level": power[0], "text": power[1]} if power else None,
+            "network": read_network(),
+        }
+
+    def demo_data(self):
+        gib = 1024 ** 3
+        return {
+            "hostname": "homelab-pi", "model": "Raspberry Pi 5 Model B Rev 1.0",
+            "os": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.6.51+rpt-rpi-2712", "uptime": "12 days",
+            "cpu": round(random.uniform(6, 14), 1), "load1": 0.21, "cores": 4, "mhz": 1500,
+            "mem": {"used": 0.9 * gib, "total": 4 * gib, "pct": 22.5},
+            "disk": {"used": 6.2 * gib, "total": 58 * gib, "pct": 10.7},
+            "temp": 52, "fan": {"rpm": 2380, "pct": 35},
+            "power": {"level": "ok", "text": "OK"},
+            "network": [
+                {"name": "eth0", "kind": "ethernet", "up": True, "ip": "192.168.1.50", "speed": 1000},
+                {"name": "wlan0", "kind": "wifi", "up": True, "ip": "192.168.1.51",
+                 "ssid": "HomeNet", "signal": -54, "bitrate": 433},
+            ],
+        }
+
+
+# --------------------------------------------------------------------------- Wi-Fi setup
+
+class WifiError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def split_nmcli(line):
+    """Split one line of `nmcli -t` output on unescaped ':' and unescape each field."""
+    fields, cur, i = [], [], 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line):
+            cur.append(line[i + 1])
+            i += 2
+            continue
+        if c == ":":
+            fields.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    fields.append("".join(cur))
+    return fields
+
+
+def parse_wifi_list(text):
+    """Nearby networks from `nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list`.
+
+    One entry per SSID (strongest signal), the connected one first, then by signal.
+    """
+    best = {}
+    for line in (text or "").splitlines():
+        f = split_nmcli(line)
+        if len(f) < 4 or not f[1]:
+            continue
+        try:
+            signal = int(f[2])
+        except ValueError:
+            signal = 0
+        net = best.setdefault(f[1], {"ssid": f[1], "signal": signal,
+                                     "secure": f[3].strip() not in ("", "--"), "active": False})
+        net["signal"] = max(net["signal"], signal)
+        net["active"] = net["active"] or f[0].strip() == "*"
+    return sorted(best.values(), key=lambda n: (not n["active"], -n["signal"], n["ssid"].lower()))
+
+
+def validate_wifi_input(ssid, password):
+    """An error message, or None when the network name and password look usable."""
+    if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32 or any(ord(c) < 32 for c in ssid):
+        return "The network name must be 1 to 32 characters."
+    if ssid.startswith("-"):
+        return "Network names starting with '-' are not supported here."
+    if not isinstance(password, str) or any(ord(c) < 32 for c in password) \
+            or (password and not 8 <= len(password) <= 63):
+        return "The password must be 8 to 63 characters (empty for an open network)."
+    return None
+
+
+def clean_nmcli_error(text):
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return re.sub(r"^Error:\s*", "", line)[:160]
+    return "Could not connect."
+
+
+DEMO_WIFI = [
+    {"ssid": "HomeNet", "signal": 82, "secure": True, "active": True},
+    {"ssid": "Neighbour 5G", "signal": 61, "secure": True, "active": False},
+    {"ssid": "CafeGuest", "signal": 38, "secure": False, "active": False},
+]
+
+
+class WifiSetup:
+    """Scan and join Wi-Fi networks through NetworkManager (nmcli).
+
+    Off until `wifi_pin` is set in the config. Every action needs that PIN, wrong
+    guesses lock the feature for a minute, and the HTTP layer only accepts requests
+    coming from the Pi itself. The password is handed to nmcli on stdin, never on
+    the command line, and is never logged.
+    """
+    MAX_FAILS = 5
+    LOCK_S = 60
+    WINDOW_S = 300
+
+    def __init__(self, get_cfg, demo=False):
+        self.get_cfg = get_cfg
+        self.demo = demo
+        self.lock = threading.Lock()
+        self.busy = threading.Lock()
+        self.fails = []
+        self.locked_until = 0.0
+
+    def configured_pin(self):
+        pin = str(self.get_cfg().get("wifi_pin") or "")
+        if self.demo and not pin:
+            return "1234"
+        return pin if len(pin) >= 4 else ""
+
+    def status(self):
+        """'ready', 'no_pin' (not configured) or 'no_nmcli' (NetworkManager missing)."""
+        if not self.configured_pin():
+            return "no_pin"
+        if not self.demo and not shutil.which("nmcli"):
+            return "no_nmcli"
+        return "ready"
+
+    def authorise(self, pin):
+        state = self.status()
+        if state != "ready":
+            raise WifiError(503, "Wi-Fi setup is not enabled." if state == "no_pin"
+                            else "NetworkManager (nmcli) is not installed.")
+        now = time.time()
+        with self.lock:
+            if now < self.locked_until:
+                raise WifiError(429, f"Too many wrong PINs. Try again in {int(self.locked_until - now) + 1} s.")
+            self.fails = [t for t in self.fails if now - t < self.WINDOW_S]
+            ok = isinstance(pin, str) and hmac.compare_digest(pin.encode(), self.configured_pin().encode())
+            if not ok:
+                self.fails.append(now)
+                if len(self.fails) >= self.MAX_FAILS:
+                    self.locked_until = now + self.LOCK_S
+                    self.fails = []
+                raise WifiError(403, "Wrong PIN.")
+            self.fails = []
+
+    def scan(self):
+        if self.demo:
+            return DEMO_WIFI
+        out = run(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "yes"])
+        if out is None:
+            raise WifiError(503, "Could not scan for networks.")
+        return parse_wifi_list(out)
+
+    def connect(self, ssid, password, hidden=False):
+        error = validate_wifi_input(ssid, password)
+        if error:
+            raise WifiError(400, error)
+        if not self.busy.acquire(blocking=False):
+            raise WifiError(409, "Another connection attempt is in progress.")
+        try:
+            if self.demo:
+                time.sleep(0.5)
+                return
+            cmd = ["nmcli", "--ask", "device", "wifi", "connect", ssid] + (["hidden", "yes"] if hidden else [])
+            try:
+                r = subprocess.run(cmd, input=password + "\n" if password else "",
+                                   capture_output=True, text=True, timeout=45)
+            except subprocess.TimeoutExpired:
+                raise WifiError(504, "Timed out while connecting.")
+            except OSError:
+                raise WifiError(503, "NetworkManager (nmcli) is not available.")
+            if r.returncode != 0:
+                raise WifiError(502, clean_nmcli_error(r.stderr or r.stdout))
+        finally:
+            self.busy.release()
+
+
 class Collector:
     def __init__(self, cfg, demo=False, config_path=None):
         self.cfg = cfg
@@ -292,6 +694,8 @@ class Collector:
         self.config_mtime = os.path.getmtime(config_path) if config_path else None
         self.config_error = None
         self.streaks = {}
+        self.pi = PiInfo(lambda: self.cfg["thresholds"], demo=demo)
+        self.wifi = WifiSetup(lambda: self.cfg, demo=demo)
         self.lock = threading.Lock()
         self.state = {"hosts": [], "alerts": [], "updated": None}
 
@@ -323,6 +727,7 @@ class Collector:
 
     def poll_once(self):
         self.reload_config_if_changed()
+        self.pi.sample_cpu()
         cfg = self.cfg  # one config for the whole poll, even if a reload lands meanwhile
         hosts_cfg = cfg["hosts"]
         if self.demo:
@@ -418,22 +823,61 @@ def make_handler(collector):
             self.send_header("Referrer-Policy", "no-referrer")
             super().end_headers()
 
+        def send_json(self, obj, status=200):
+            body = json.dumps(obj).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
-            if self.path.split("?")[0] == "/api/state":
-                body = json.dumps(collector.snapshot()).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
+            route = self.path.split("?")[0]
+            if route == "/api/state":
+                return self.send_json(collector.snapshot())
+            if route == "/api/pi":
+                return self.send_json({**collector.pi.snapshot(), "wifi_setup": collector.wifi.status()})
             if self.path == "/healthz":
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"ok")
                 return
             return super().do_GET()
+
+        def local_request(self):
+            """True only for a same-origin request from the Pi's own browser (no LAN or DNS-rebinding callers)."""
+            host = self.headers.get("Host") or ""
+            name = host.rsplit(":", 1)[0].strip("[]").lower()
+            origin = self.headers.get("Origin")
+            return (self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+                    and name in ("127.0.0.1", "localhost", "::1")
+                    and (origin is None or origin == f"http://{host}"))
+
+        def do_POST(self):
+            route = self.path.split("?")[0]
+            if route not in ("/api/wifi/scan", "/api/wifi/connect"):
+                return self.send_json({"error": "Not found."}, 404)
+            if not self.local_request():
+                return self.send_json({"error": "Wi-Fi setup only works on the Pi's own screen."}, 403)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 4096 or "application/json" not in (self.headers.get("Content-Type") or ""):
+                    raise ValueError
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict):
+                    raise ValueError
+            except ValueError:
+                return self.send_json({"error": "Bad request."}, 400)
+            wifi = collector.wifi
+            try:
+                wifi.authorise(body.get("pin"))
+                if route.endswith("/scan"):
+                    return self.send_json({"networks": wifi.scan()})
+                wifi.connect(body.get("ssid"), body.get("password") or "", body.get("hidden") is True)
+                return self.send_json({"ok": True})
+            except WifiError as e:
+                return self.send_json({"error": e.message}, e.status)
 
         def log_message(self, fmt, *args):  # keep the journal quiet
             pass

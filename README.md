@@ -18,6 +18,7 @@ Nothing to compile and no pip packages: the agent is the official `nicolargo/gla
 </p>
 <p>
   <img src="docs/screenshot-alerts.png" alt="Alerts: everything that needs attention" width="49%">
+  <img src="docs/screenshot-info.png" alt="Pi info: CPU, memory, disk, temperature, fan, Ethernet and Wi-Fi" width="49%">
 </p>
 
 _Screenshots use the built-in demo data (`python3 server.py --demo`), at the screen's native 800×480._
@@ -95,6 +96,8 @@ If you'd rather push your local checkout straight to a machine over SSH, use `de
 - **Overview** shows one column per server with CPU, memory, the fullest disk, container count and CPU temperature. Tap a server to see its containers.
 - **Containers** lists every container on the selected server, with problems at the top. Tap the server names at the top to switch.
 - **Alerts** lists everything that needs attention.
+- **The round "i" button** next to the clock opens the Pi's own status: CPU (with clock speed), memory, disk, temperature, fan, power or under-voltage warnings, Ethernet link and speed, Wi-Fi network, signal and bit rate, IP addresses, model, OS, uptime and load. Tap it again to go back. It reads the Pi that runs the dashboard, not your servers. Fan and power only appear when the Pi exposes them (Pi 4 and 5 with the official fan).
+- **Wi-Fi settings** (button in that panel) lets you pick a network and type its password on the screen. See [Changing Wi-Fi from the screen](#changing-wi-fi-from-the-screen).
 - The screen goes back to Overview after 90 seconds without a touch.
 
 A server turns amber ("Attention") when any of these happen:
@@ -104,6 +107,26 @@ A server turns amber ("Attention") when any of these happen:
 
 It turns red ("Offline") when its agent stops answering. If the data stops updating, or the Pi service can't be reached, a red "stale" or "service unreachable" note appears next to the title on every screen.
 
+## Changing Wi-Fi from the screen
+
+Off by default. To turn it on, install with `--wifi`:
+
+```bash
+./install.sh pi --console --wifi
+```
+
+This needs **NetworkManager** (the default on Raspberry Pi OS Bookworm and newer; not on older Bullseye images). The installer then:
+
+1. asks you to choose a **PIN** (4 to 8 digits) and stores it as `wifi_pin` in `/opt/homelab-dashboard/config.json`,
+2. runs the dashboard service as a dedicated login-less user in the `netdev` group, which is what lets NetworkManager accept the change without root,
+3. installs `iw`, so the info panel can show the network name and signal.
+
+On the screen: **i → Wi-Fi settings → PIN → choose a network → type the password → Connect**. Hidden networks are under "Other network…". Open networks connect straight away. Wrong PINs lock the feature for a minute after five tries, and leaving the screen forgets the PIN and password.
+
+Without `--wifi` the panel just shows a hint that Wi-Fi changes are off. Ethernet is never touched, so a bad Wi-Fi change can't lock you out of SSH if the cable is plugged in.
+
+> **Not yet tested on real hardware.** The scan, connect and PIN logic is covered by unit tests with a fake NetworkManager, and the screen flow was checked in the built-in demo (`--demo` accepts PIN `1234`), but I haven't run the real `nmcli` path on a Pi. If connecting fails, run `journalctl -u homelab-dashboard -n 50` on the Pi and open an issue with the message.
+
 ## Settings (`/opt/homelab-dashboard/config.json` on the Pi)
 
 | Key | What it does |
@@ -112,6 +135,7 @@ It turns red ("Offline") when its agent stops answering. If the data stops updat
 | `thresholds` | Warning levels for CPU %, memory %, disk % and temperature °C. |
 | `hide_containers` | Containers never shown (the agent itself by default). |
 | `expected_stopped` | Containers that are allowed to be stopped, such as one-shot backup jobs, so they don't raise alerts. Also accepted inside a single host entry (`"expected_stopped": ["backup"]`) to apply to that host only. |
+| `wifi_pin` | PIN that unlocks Wi-Fi changes on the screen (4+ characters; digits recommended). Empty means the feature is off. Set by `./install.sh pi --wifi`, or edit by hand. |
 | `alert_confirm_samples` | How many polls in a row a problem must last before it shows (default 2, about 10 s). Stops a value hovering at a threshold from flipping the screen back and forth. Set to 1 for instant alerts. |
 | `disk_mounts` (per host) | Limit which mount points count as disks, e.g. `["/", "/host/data"]`. |
 | `listen` / `port` | Where the Pi serves the page. Set `listen` to `"0.0.0.0"` to open the dashboard from your laptop too. |
@@ -154,7 +178,8 @@ This project is meant for a **trusted home network**. What that means in practic
 | Glances API on each server (`:61208`) | Read-only JSON, **no password** | The installer adds a `ufw` rule allowing only the Pi's IP. It prints a warning when it can't (no Pi IP given, or `ufw` missing or inactive). Never expose this port to the internet. |
 | Agent container | Mounts the Docker socket, so a compromised agent can control Docker on that host. `:ro` does not prevent this, it only stops the socket file being replaced | Image pinned to a specific version, `no-new-privileges`, firewall rule above. Keep the pin updated (Dependabot opens a PR monthly). |
 | Dashboard on the Pi (`:8080`) | Shows server names, IPs and container names, **no password** | Listens on `127.0.0.1` by default. Only set `listen` to `0.0.0.0` on a network you trust. Responses carry a strict Content-Security-Policy, `nosniff` and no-referrer headers, and all data is HTML-escaped in the page. |
-| Aggregator service | Polls the agents over plain HTTP | Runs as a throwaway user (`DynamicUser`) with no capabilities, a read-only filesystem, a private `/tmp` and only IP and local sockets allowed. |
+| Aggregator service | Polls the agents over plain HTTP | Runs as a throwaway user (`DynamicUser`) with no capabilities, a read-only filesystem, a private `/tmp` and only IP, local and netlink sockets allowed (netlink is how it reads network and Wi-Fi status). |
+| Wi-Fi changes (opt-in, `--wifi`) | The only part that can **change** anything. Anyone who gets past it could join the Pi to another network | Disabled until you set a PIN. Only accepts requests that come from the Pi itself (loopback address, matching `Host` and `Origin`, JSON only), so other machines on the LAN and DNS-rebinding web pages are refused even if you set `listen` to `0.0.0.0`. PIN is compared in constant time, with a one-minute lockout after five wrong tries. The password goes to NetworkManager on stdin, never on a command line, and is never logged. The service then runs as a fixed user in `netdev`, which can manage all of NetworkManager; the PIN is stored in plain text in `config.json`. |
 | `install.sh` | Runs repository code with `sudo` | Read it before running, pin `REPO_REF` to a release tag, or review changes after `git pull`. Tokens are never written into the clone's remote URL. |
 
 What is **not** in this repo: no credentials, tokens or keys of any kind. Your real `pi/config.json` (which holds your server IPs) is git-ignored. Only `config.example.json` with placeholder addresses is tracked.
@@ -201,7 +226,7 @@ shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
 | `pi/install-pi.sh`, `pi/diagnose.sh` | Pi installer and health check |
 | `install.sh` | Install or update a machine from GitHub (clones the repo, runs the installer) |
 | `deploy.sh` | Push your local checkout to a machine over SSH and install |
-| `docs/` | Screenshots used in this README |
+| `docs/` | Screenshots used in this README (taken from `--demo`, with deep links such as `/#info`, `/#alerts`) |
 | `tests/` | Unit tests for the aggregator |
 | `.github/workflows/ci.yml` | Runs the tests, ShellCheck and a compose-file check |
 
