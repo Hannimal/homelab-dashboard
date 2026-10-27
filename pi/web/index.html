@@ -198,15 +198,16 @@
       const disk = (h.disks && h.disks[0]) || null;
       const hotDisk = disk && h.alerts.some((a) => a.text.startsWith(`Disk ${disk.mount} `));
       const hotMem = h.alerts.some((a) => a.text.startsWith("Memory"));
-      const tempTxt = h.temp != null ? `<span><b>${h.temp}°</b> C</span>` : "<span></span>";
+      const hotTemp = h.alerts.some((a) => a.text.startsWith("CPU temperature"));
       const ctr = h.running === h.total ? `<b>${h.total}</b> containers` : `<b>${h.running}</b> of ${h.total} containers`;
       return `<button class="host" data-host="${esc(h.name)}">${head}
         <div><div class="big">${Math.round(h.cpu)}<small>%</small></div><div class="caption">CPU${h.uptime ? " · up " + esc(h.uptime) : ""}</div></div>
         <div class="metrics">
           ${metric("Memory", `${gb(h.mem_used)} / ${Math.round(h.mem_total / 1024 ** 3)} GB`, h.mem_pct, hotMem)}
           ${disk ? metric(disk.mount === "/" ? "Disk" : "Disk " + disk.mount, `${Math.round(disk.pct)}%`, disk.pct, hotDisk) : ""}
+          ${h.temp != null ? metric("Temp", `${h.temp}°C`, h.temp, hotTemp) : ""}
         </div>
-        <div class="foot"><span>${ctr}</span>${tempTxt}</div></button>`;
+        <div class="foot"><span>${ctr}</span></div></button>`;
     }).join("");
 
     const msg = $("statusmsg");

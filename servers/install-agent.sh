@@ -42,6 +42,13 @@ for _ in $(seq 1 30); do
   if curl -fs http://127.0.0.1:61208/api/4/status >/dev/null 2>&1; then
     echo " - ready."
     echo "Agent running on $(hostname): http://$(hostname -I | awk '{print $1}'):61208/api/4/cpu"
+    if curl -fs http://127.0.0.1:61208/api/4/sensors | grep -q '"temperature_core"'; then
+      echo "CPU temperature: available."
+    else
+      echo "Note: this machine exposes no temperature sensor to Glances (common in VMs and LXC)." >&2
+      echo "      The dashboard works without it and simply hides the temperature row." >&2
+      echo "      Check on the host: ls /sys/class/hwmon /sys/class/thermal" >&2
+    fi
     exit 0
   fi
   echo -n "."; sleep 2

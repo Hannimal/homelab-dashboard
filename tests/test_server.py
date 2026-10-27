@@ -53,6 +53,29 @@ class Formatting(unittest.TestCase):
         self.assertEqual(server.short_uptime(""), "—")
 
 
+class CpuTemp(unittest.TestCase):
+    def s(self, label, value, type_="temperature_core"):
+        return {"label": label, "value": value, "type": type_}
+
+    def test_none_without_sensors(self):
+        self.assertIsNone(server.cpu_temp(None))
+        self.assertIsNone(server.cpu_temp([]))
+        self.assertIsNone(server.cpu_temp([self.s("x", 0)]))
+
+    def test_raspberry_pi(self):
+        self.assertEqual(server.cpu_temp([self.s("cpu_thermal 0", 52.6)]), 53)
+
+    def test_prefers_cpu_over_nvme_and_wifi(self):
+        sensors = [self.s("Package id 0", 55), self.s("Core 1", 58), self.s("Composite", 71), self.s("iwlwifi_1", 66)]
+        self.assertEqual(server.cpu_temp(sensors), 58)
+
+    def test_falls_back_to_any_temperature(self):
+        self.assertEqual(server.cpu_temp([self.s("Composite", 40)]), 40)
+
+    def test_ignores_non_temperature_types(self):
+        self.assertIsNone(server.cpu_temp([self.s("fan1", 3000, "fan_speed")]))
+
+
 class Evaluate(unittest.TestCase):
     def test_healthy(self):
         h = server.evaluate(host(), cfg())

@@ -124,6 +124,22 @@ def short_uptime(text):
 
 # --------------------------------------------------------------------------- collection
 
+# Glances reports every temperature as "temperature_core", including NVMe drives,
+# GPUs and Wi-Fi cards. These labels are not the CPU, so they are skipped when
+# something else is available.
+NON_CPU_SENSOR = re.compile(r"nvme|composite|drive|gpu|wifi|iwl|amdgpu|sensor \d", re.I)
+
+
+def cpu_temp(sensors):
+    """Hottest CPU temperature in °C from Glances' /sensors list, or None."""
+    temps = [s for s in (sensors or [])
+             if s.get("type") == "temperature_core"
+             and isinstance(s.get("value"), (int, float)) and s["value"] > 0]
+    cpu = [s for s in temps if not NON_CPU_SENSOR.search(str(s.get("label", "")))]
+    chosen = cpu or temps
+    return round(max(s["value"] for s in chosen)) if chosen else None
+
+
 ENDPOINTS = ("cpu", "mem", "fs", "uptime", "sensors", "containers", "load")
 
 
@@ -179,9 +195,7 @@ def collect_host(host, cfg):
                           "used": fs.get("used"), "size": fs.get("size")}
     out["disks"] = sorted(disks.values(), key=lambda d: -d["pct"])
 
-    temps = [s.get("value") for s in (raw.get("sensors") or [])
-             if s.get("type") == "temperature_core" and isinstance(s.get("value"), (int, float)) and s.get("value") > 0]
-    out["temp"] = round(max(temps)) if temps else None
+    out["temp"] = cpu_temp(raw.get("sensors"))
 
     hide = set(cfg["hide_containers"])
     containers = []
