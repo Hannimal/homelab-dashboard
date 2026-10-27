@@ -34,9 +34,11 @@ On each machine, download the installer and read it (it runs with `sudo`, so you
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Hannimal/homelab-dashboard/main/install.sh -o install.sh
-less install.sh
+less install.sh      # press q to quit. Prefer plain output? Use: cat install.sh
 chmod +x install.sh
 ```
+
+If `less` ever shows `[1]+ Stopped`, it was suspended by Ctrl+Z. Type `fg`, then `q`.
 
 For reproducible installs, pin a release tag instead of following `main`: `REPO_REF=v1.1.0 ./install.sh ...`
 
