@@ -62,10 +62,29 @@ python3 -c "import json;json.load(open('$DEST/config.json'))" || { echo "config.
 RUN_AS="DynamicUser=yes"
 if [ -n "$WIFI" ]; then
   echo "==> Enabling Wi-Fi changes from the screen"
-  # NetworkManager's polkit rules trust members of netdev by their account, which a
-  # DynamicUser does not have, so the service gets a fixed, login-less account.
+  # NetworkManager asks polkit before it lets anyone scan or join a network. A DynamicUser
+  # has no stable name to write a rule for, so the service gets a fixed, login-less account,
+  # and one small rule grants that account only the four actions Wi-Fi setup needs.
+  # (Membership in netdev is not enough: on current Raspberry Pi OS polkit still answers
+  # "auth required" to a service, so NetworkManager refuses with "Not authorized".)
   id -u homelab-dashboard >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin homelab-dashboard
-  sudo usermod -aG netdev homelab-dashboard
+  sudo gpasswd -d homelab-dashboard netdev >/dev/null 2>&1 || true   # earlier versions added it; it grants nothing useful
+  sudo mkdir -p /etc/polkit-1/rules.d
+  sudo tee /etc/polkit-1/rules.d/50-homelab-dashboard-wifi.rules >/dev/null << 'RULES_EOF'
+// Installed by homelab-dashboard (install.sh pi --wifi).
+// Lets the dashboard's service user scan for and join Wi-Fi networks, and nothing else.
+polkit.addRule(function(action, subject) {
+  var allowed = [
+    "org.freedesktop.NetworkManager.network-control",
+    "org.freedesktop.NetworkManager.wifi.scan",
+    "org.freedesktop.NetworkManager.settings.modify.system",
+    "org.freedesktop.NetworkManager.settings.modify.own"
+  ];
+  if (subject.user == "homelab-dashboard" && allowed.indexOf(action.id) !== -1) {
+    return polkit.Result.YES;
+  }
+});
+RULES_EOF
   RUN_AS="User=homelab-dashboard"
   HAVE_PIN="$(python3 -c "import json;print(len(str(json.load(open('$DEST/config.json')).get('wifi_pin') or '')))")"
   if [ "$HAVE_PIN" -lt 4 ]; then
