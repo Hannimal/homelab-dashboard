@@ -42,14 +42,15 @@ if [ -n "$FORCE_CONSOLE" ] || { ! command -v labwc >/dev/null && ! command -v wa
   echo "   No desktop found - installing the minimal kiosk mode (cage + Chromium)"
 fi
 sudo apt-get install -y -qq --no-install-recommends python3 curl "$BROWSER_PKG" ${HEADLESS:+cage}
+sudo apt-get install -y -qq brightnessctl wlr-randr 2>/dev/null || echo "   (brightnessctl / wlr-randr not available; screen sleep will only black out the page)"
 sudo apt-get install -y -qq iw 2>/dev/null || echo "   (iw not available; the info panel will show less Wi-Fi detail)"
 sudo apt-get install -y -qq fonts-inter 2>/dev/null || echo "   (fonts-inter not available; using the system font)"
 
 echo "==> Copying files to $DEST"
 sudo mkdir -p "$DEST/web"
-sudo cp "$SRC/server.py" "$SRC/kiosk.sh" "$SRC/start-kiosk.sh" "$SRC/diagnose.sh" "$DEST/"
-sudo cp "$SRC/web/index.html" "$DEST/web/"
-sudo chmod +x "$DEST/server.py" "$DEST/kiosk.sh" "$DEST/start-kiosk.sh" "$DEST/diagnose.sh"
+sudo cp "$SRC/server.py" "$SRC/kiosk.sh" "$SRC/start-kiosk.sh" "$SRC/screen-power.sh" "$SRC/diagnose.sh" "$DEST/"
+sudo cp "$SRC"/web/* "$DEST/web/"
+sudo chmod +x "$DEST/server.py" "$DEST/kiosk.sh" "$DEST/start-kiosk.sh" "$DEST/screen-power.sh" "$DEST/diagnose.sh"
 if [ -f "$SRC/config.json" ]; then
   sudo cp "$SRC/config.json" "$DEST/config.json"
   echo "   Using your config.json"

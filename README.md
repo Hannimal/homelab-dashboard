@@ -127,6 +127,39 @@ Without `--wifi` the panel just shows a hint that Wi-Fi changes are off. Etherne
 
 > **Not yet tested on real hardware.** The scan, connect and PIN logic is covered by unit tests with a fake NetworkManager, and the screen flow was checked in the built-in demo (`--demo` accepts PIN `1234`), but I haven't run the real `nmcli` path on a Pi. If connecting fails, run `journalctl -u homelab-dashboard -n 50` on the Pi and open an issue with the message.
 
+## Turning the screen off on a timer
+
+Add a `screen` block to `/opt/homelab-dashboard/config.json` (changes apply within a few seconds, no restart):
+
+```json
+"screen": {
+  "off_at": "23:00",
+  "on_at": "07:00",
+  "idle_minutes": 0,
+  "wake_seconds": 60,
+  "wake_on_alert": false,
+  "method": "auto"
+}
+```
+
+| Key | What it does |
+| --- | --- |
+| `off_at`, `on_at` | A daily window (24-hour `"HH:MM"`, Pi's clock) in which the screen is asleep. It can cross midnight, as above. Set both or neither. |
+| `idle_minutes` | Also sleep after this many minutes without a touch, outside the window. `0` means never. |
+| `wake_seconds` | A touch inside the window wakes the screen for this long, then it sleeps again (5 to 3600, default 60). |
+| `wake_on_alert` | `true` wakes a sleeping screen when a new alert appears, for `wake_seconds`. Default `false`. |
+| `method` | How the real display is switched off: `auto` (try them all), `wlr-randr`, `backlight`, `x11`, `vcgencmd`, or `none` to only black out the page. |
+
+**How it works.** The dashboard page covers itself in black on your schedule, and the first touch wakes it (that touch doesn't press anything underneath). That part works on any display. A small helper (`screen-power.sh`, started with the kiosk) then also tries to switch the real display or backlight off, which saves power and stops a lit-up black panel glowing in a dark room. Whether the helper can do that depends on your screen and compositor:
+
+- `backlight`: panels that expose a backlight (many DSI screens). Needs `brightnessctl`, which the installer adds.
+- `wlr-randr`: Wayland compositors with output management (labwc, wayfire). Not every minimal kiosk compositor supports it.
+- `x11` and `vcgencmd`: X11 sessions and the older firmware driver.
+
+With `"method": "auto"` it tries them in that order and remembers the one that works. **Check which one did:** `cat ~/.cache/homelab-screen.log` on the Pi, or run `/opt/homelab-dashboard/diagnose.sh`. If the log says none worked, the screen still goes black, but the backlight stays on. Set `"method": "none"` to stop the helper trying.
+
+**It can't leave you with a dark screen.** The page reports its state every 30 seconds. If the browser crashes or the service stops, the helper switches the display back on within about two minutes, and it also switches it on when it exits.
+
 ## Settings (`/opt/homelab-dashboard/config.json` on the Pi)
 
 | Key | What it does |
@@ -135,6 +168,7 @@ Without `--wifi` the panel just shows a hint that Wi-Fi changes are off. Etherne
 | `thresholds` | Warning levels for CPU %, memory %, disk % and temperature °C. |
 | `hide_containers` | Containers never shown (the agent itself by default). |
 | `expected_stopped` | Containers that are allowed to be stopped, such as one-shot backup jobs, so they don't raise alerts. Also accepted inside a single host entry (`"expected_stopped": ["backup"]`) to apply to that host only. |
+| `screen` | Sleep schedule and idle timeout for the screen, see [Turning the screen off on a timer](#turning-the-screen-off-on-a-timer). |
 | `wifi_pin` | PIN that unlocks Wi-Fi changes on the screen (4+ characters; digits recommended). Empty means the feature is off. Set by `./install.sh pi --wifi`, or edit by hand. |
 | `alert_confirm_samples` | How many polls in a row a problem must last before it shows (default 2, about 10 s). Stops a value hovering at a threshold from flipping the screen back and forth. Set to 1 for instant alerts. |
 | `disk_mounts` (per host) | Limit which mount points count as disks, e.g. `["/", "/host/data"]`. |
@@ -179,6 +213,7 @@ This project is meant for a **trusted home network**. What that means in practic
 | Agent container | Mounts the Docker socket, so a compromised agent can control Docker on that host. `:ro` does not prevent this, it only stops the socket file being replaced | Image pinned to a specific version, `no-new-privileges`, firewall rule above. Keep the pin updated (Dependabot opens a PR monthly). |
 | Dashboard on the Pi (`:8080`) | Shows server names, IPs and container names, **no password** | Listens on `127.0.0.1` by default. Only set `listen` to `0.0.0.0` on a network you trust. Responses carry a strict Content-Security-Policy, `nosniff` and no-referrer headers, and all data is HTML-escaped in the page. |
 | Aggregator service | Polls the agents over plain HTTP | Runs as a throwaway user (`DynamicUser`) with no capabilities, a read-only filesystem, a private `/tmp` and only IP, local and netlink sockets allowed (netlink is how it reads network and Wi-Fi status). |
+| Screen sleep (`POST /api/screen`) | Lets the page tell the Pi to switch the display off. Worst case someone blanks your screen | Only accepts requests from the Pi itself, same checks as Wi-Fi setup. `screen-power.sh` runs a fixed list of display commands and never anything it receives over the network. A stale or unreachable state means "on". |
 | Wi-Fi changes (opt-in, `--wifi`) | The only part that can **change** anything. Anyone who gets past it could join the Pi to another network | Disabled until you set a PIN. Only accepts requests that come from the Pi itself (loopback address, matching `Host` and `Origin`, JSON only), so other machines on the LAN and DNS-rebinding web pages are refused even if you set `listen` to `0.0.0.0`. PIN is compared in constant time, with a one-minute lockout after five wrong tries. The password goes to NetworkManager on stdin, never on a command line, and is never logged. The service then runs as a fixed user that polkit lets scan and join networks (four NetworkManager actions, nothing else); the PIN is stored in plain text in `config.json`. |
 | `install.sh` | Runs repository code with `sudo` | Read it before running, pin `REPO_REF` to a release tag, or review changes after `git pull`. Tokens are never written into the clone's remote URL. |
 
@@ -211,6 +246,7 @@ cd pi && cp config.example.json config.json && python3 server.py --demo
 Tests (standard library only) and the checks CI runs:
 
 ```bash
+node --test tests/
 python3 -m unittest discover -s tests -v
 shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
 ```
@@ -226,6 +262,7 @@ shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
 | `pi/install-pi.sh`, `pi/diagnose.sh` | Pi installer and health check |
 | `install.sh` | Install or update a machine from GitHub (clones the repo, runs the installer) |
 | `deploy.sh` | Push your local checkout to a machine over SSH and install |
+| `pi/web/screen.js`, `pi/screen-power.sh` | Sleep rules (tested in Node) and the helper that switches the real display |
 | `docs/` | Screenshots used in this README (taken from `--demo`, with deep links such as `/#info`, `/#alerts`) |
 | `tests/` | Unit tests for the aggregator |
 | `.github/workflows/ci.yml` | Runs the tests, ShellCheck and a compose-file check |

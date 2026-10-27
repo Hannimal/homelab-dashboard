@@ -20,5 +20,14 @@
   "hide_containers": ["glances-agent"],
   "expected_stopped": [],
   "alert_confirm_samples": 2,
-  "wifi_pin": ""
+  "wifi_pin": "",
+
+  "screen": {
+    "idle_minutes": 0,
+    "off_at": "",
+    "on_at": "",
+    "wake_seconds": 60,
+    "wake_on_alert": false,
+    "method": "auto"
+  }
 }

@@ -446,6 +446,7 @@ class WifiHttp(unittest.TestCase):
                                      headers={"Content-Type": "text/plain"})
         with self.assertRaises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(req)
+        e.exception.close()
         self.assertEqual(e.exception.code, 400)
 
     def test_pi_endpoint_reports_setup_state(self):
@@ -458,6 +459,109 @@ class WifiHttp(unittest.TestCase):
 
     def test_unknown_post_route(self):
         self.assertEqual(self.post(self.base, "/api/state", {})[0], 404)
+
+
+class ScreenConfig(unittest.TestCase):
+    def screen(self, **over):
+        s = dict(server.DEFAULTS["screen"])
+        s.update(over)
+        return s
+
+    def test_defaults_and_good_values_pass(self):
+        server.check_screen(self.screen())
+        server.check_screen(self.screen(idle_minutes=10, off_at="23:00", on_at="07:30", wake_seconds=120,
+                                        wake_on_alert=True, method="wlr-randr"))
+        server.check_screen(self.screen(off_at="7:05", on_at="21:00"))
+
+    def test_bad_values_are_refused(self):
+        for over in ({"idle_minutes": -1}, {"idle_minutes": "5"}, {"idle_minutes": True},
+                     {"wake_seconds": 1}, {"wake_seconds": 99999},
+                     {"off_at": "25:00", "on_at": "07:00"}, {"off_at": "23:00", "on_at": "7am"},
+                     {"off_at": "23:00"}, {"on_at": "07:00"},
+                     {"method": "rm -rf /"}, {"wake_on_alert": "yes"}):
+            with self.assertRaises(SystemExit, msg=str(over)):
+                server.check_screen(self.screen(**over))
+
+    def test_load_config_applies_the_check_and_merges_partial_blocks(self):
+        import json, tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"hosts": [{"name": "a", "address": "1"}], "screen": {"off_at": "23:00", "on_at": "07:00"}}, f)
+        try:
+            c = server.load_config(f.name)
+        finally:
+            os.unlink(f.name)
+        self.assertEqual((c["screen"]["off_at"], c["screen"]["wake_seconds"], c["screen"]["method"]), ("23:00", 60, "auto"))
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"hosts": [{"name": "a", "address": "1"}], "screen": {"method": "bogus"}}, f)
+        try:
+            with self.assertRaises(SystemExit):
+                server.load_config(f.name)
+        finally:
+            os.unlink(f.name)
+
+
+class ScreenStateTests(unittest.TestCase):
+    def test_on_by_default_and_follows_reports(self):
+        st = server.ScreenState()
+        self.assertEqual(st.current(), "on")
+        st.report("off")
+        self.assertEqual(st.current(), "off")
+        st.report("on")
+        self.assertEqual(st.current(), "on")
+
+    def test_stale_off_falls_back_to_on(self):
+        st = server.ScreenState()
+        st.report("off")
+        st.stamp -= st.STALE_S + 1   # the page stopped reporting
+        self.assertEqual(st.current(), "on")
+
+
+class ScreenHttp(unittest.TestCase):
+    def setUp(self):
+        import threading
+        self.collector = server.Collector(cfg(screen={**server.DEFAULTS["screen"], "method": "backlight"}), demo=True)
+        self.collector.poll_once()
+        self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.collector))
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def request(self, method, path, body=None, headers=None):
+        import json
+        import urllib.error
+        import urllib.request
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read())
+
+    def test_page_reports_and_watcher_reads(self):
+        self.assertEqual(self.request("GET", "/api/screen"), (200, {"state": "on", "method": "backlight"}))
+        self.assertEqual(self.request("POST", "/api/screen", {"state": "off"}), (200, {"ok": True}))
+        self.assertEqual(self.request("GET", "/api/screen")[1]["state"], "off")
+        self.request("POST", "/api/screen", {"state": "on"})
+        self.assertEqual(self.request("GET", "/api/screen")[1]["state"], "on")
+
+    def test_rejects_bad_state_and_foreign_callers(self):
+        self.assertEqual(self.request("POST", "/api/screen", {"state": "dim"})[0], 400)
+        self.assertEqual(self.request("POST", "/api/screen", {})[0], 400)
+        self.assertEqual(self.request("POST", "/api/screen", {"state": "off"}, {"Host": "attacker.example"})[0], 403)
+        self.assertEqual(self.request("POST", "/api/screen", {"state": "off"}, {"Origin": "http://attacker.example"})[0], 403)
+        self.assertEqual(self.request("GET", "/api/screen")[1]["state"], "on")
+
+    def test_state_carries_the_screen_settings_to_the_page(self):
+        status, state = self.request("GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(state["screen"]["method"], "backlight")
+        self.assertIn("idle_minutes", state["screen"])
 
 
 class PollOnce(unittest.TestCase):

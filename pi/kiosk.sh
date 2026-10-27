@@ -24,6 +24,12 @@ EXTRA=(--user-data-dir="$PROFILE_DIR")
 # Running under cage (no desktop): talk Wayland directly
 [ -n "${WAYLAND_DISPLAY:-}" ] && EXTRA+=(--ozone-platform=wayland)
 
+# Switches the real display off and on when the dashboard goes to sleep (see "screen" in config.json).
+# It stops by itself when this browser exits, and lets only one copy run.
+if [ -x /opt/homelab-dashboard/screen-power.sh ]; then
+  /opt/homelab-dashboard/screen-power.sh &   # its parent is this shell, which becomes the browser below
+fi
+
 exec "$BROWSER" "${EXTRA[@]}" \
   --kiosk "$URL" \
   --incognito \

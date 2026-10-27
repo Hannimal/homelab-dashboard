@@ -95,6 +95,10 @@
   .alert .h { color: var(--muted); }
   .alert:first-child { margin-top: 6px; }
 
+  /* Sleep: a black cover over everything; the first touch only wakes the screen */
+  #sleep { position: fixed; inset: 0; z-index: 100; background: #000; display: none; }
+  body.asleep #sleep { display: block; }
+
   /* Info button and Pi status panel */
   #infoBtn { width: 40px; height: 40px; margin-left: 12px; flex: none; border: 1px solid var(--line); border-radius: 50%;
              color: var(--muted); font: italic 600 17px Georgia, serif; display: flex; align-items: center; justify-content: center; }
@@ -174,6 +178,9 @@
   </nav>
 </div>
 
+<div id="sleep"></div>
+
+<script src="screen.js"></script>
 <script>
 (() => {
   const POLL_MS = 5000;
@@ -219,6 +226,41 @@
   $("nav").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) show(b.dataset.view); });
   document.addEventListener("pointerdown", () => { lastTouch = Date.now(); }, true);
   setInterval(() => { if (view !== "overview" && Date.now() - lastTouch > IDLE_RETURN_MS) show("overview"); }, 5000);
+
+  // ---- screen sleep (schedule and idle timeout come from the "screen" block of config.json)
+  let asleep = false, alertUntil = 0, seenAlerts = null, ignoreClicksUntil = 0, lastReport = { state: null, at: 0 };
+  const screenCfg = () => (state && state.screen) || {};
+
+  // Tell the Pi (screen-power.sh watches this) whether to switch the real display off.
+  // Repeated every 30 s: if these stop, the Pi treats the screen as on, so a crash never leaves it dark.
+  function reportScreen() {
+    const s = asleep ? "off" : "on", now = Date.now();
+    if (s === lastReport.state && now - lastReport.at < 30000) return;
+    lastReport = { state: s, at: now };
+    fetch("/api/screen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state: s }) }).catch(() => {});
+  }
+  function screenTick() {
+    const sleepNow = HomelabScreen.shouldSleep(screenCfg(), Date.now(), lastTouch, alertUntil);
+    if (sleepNow !== asleep) { asleep = sleepNow; document.body.classList.toggle("asleep", asleep); }
+    reportScreen();
+  }
+  function wakeOnNewAlert() {   // a problem that was not there a moment ago wakes a sleeping screen
+    if (!state) return;
+    const keys = new Set(state.alerts.map((a) => `${a.host}|${a.text}`));
+    if (seenAlerts && screenCfg().wake_on_alert && [...keys].some((k) => !seenAlerts.has(k))) {
+      alertUntil = Date.now() + (screenCfg().wake_seconds || 60) * 1000;
+      screenTick();
+    }
+    seenAlerts = keys;
+  }
+  $("sleep").addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    lastTouch = Date.now();
+    ignoreClicksUntil = lastTouch + 400;   // the touch that wakes the screen must not press a button underneath
+    screenTick();
+  });
+  document.addEventListener("click", (e) => { if (Date.now() < ignoreClicksUntil) { e.stopPropagation(); e.preventDefault(); } }, true);
+  setInterval(screenTick, 1000);
 
   $("overview").addEventListener("click", (e) => {
     const h = e.target.closest(".host");
@@ -504,6 +546,7 @@
       if (!r.ok) throw new Error(r.status);
       state = await r.json();
       fetchError = false;
+      wakeOnNewAlert();
     } catch (e) {
       fetchError = true;
     }

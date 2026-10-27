@@ -37,6 +37,14 @@ if command -v labwc >/dev/null || command -v wayfire >/dev/null || command -v lx
   info "a desktop is installed on this Pi; use ./install-pi.sh --console to force the no-desktop kiosk"
 fi
 
+echo "Screen sleep"
+if [ -x "$DEST/screen-power.sh" ]; then ok "screen-power.sh installed"; else bad "screen-power.sh missing" "re-run ./install.sh pi"; fi
+if pgrep -f screen-power.sh >/dev/null; then ok "watcher is running"; else info "watcher not running (it starts with the kiosk)"; fi
+printf '        api: %s\n' "$(curl -fs "http://127.0.0.1:$PORT/api/screen" 2>&1)"
+for t in wlr-randr brightnessctl xset vcgencmd; do command -v $t >/dev/null && info "found $t"; done
+ls /sys/class/backlight 2>/dev/null | sed 's/^/        backlight device: /'
+if [ -f "$HOME/.cache/homelab-screen.log" ]; then tail -n 6 "$HOME/.cache/homelab-screen.log" | sed 's/^/        /'; else info "no switches logged yet"; fi
+
 echo "Last kiosk log ($HOME/.cache/homelab-kiosk.log)"
 if [ -f "$HOME/.cache/homelab-kiosk.log" ]; then tail -n 15 "$HOME/.cache/homelab-kiosk.log" | sed 's/^/        /'
 else info "no log yet - the kiosk has not tried to start since this version was installed"; fi

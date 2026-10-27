@@ -41,6 +41,8 @@ DEFAULTS = {
     "expected_stopped": [],
     "alert_confirm_samples": 2,
     "wifi_pin": "",
+    "screen": {"idle_minutes": 0, "off_at": "", "on_at": "", "wake_seconds": 60,
+               "wake_on_alert": False, "method": "auto"},
     "hosts": [],
 }
 
@@ -63,7 +65,30 @@ def load_config(path):
             cfg[k] = v
     if not cfg["hosts"]:
         raise SystemExit(f"No hosts defined in {path}")
+    check_screen(cfg["screen"])
     return cfg
+
+
+SCREEN_METHODS = ("auto", "none", "wlr-randr", "backlight", "x11", "vcgencmd")
+
+
+def check_screen(screen):
+    """Stop a bad "screen" block from being applied; the old config stays in force."""
+    def time_ok(v):
+        return v == "" or bool(re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", str(v)))
+    idle, wake = screen.get("idle_minutes"), screen.get("wake_seconds")
+    if isinstance(idle, bool) or not isinstance(idle, (int, float)) or idle < 0:
+        raise SystemExit('screen.idle_minutes must be a number, 0 or more (0 = never sleep when idle)')
+    if isinstance(wake, bool) or not isinstance(wake, (int, float)) or not 5 <= wake <= 3600:
+        raise SystemExit("screen.wake_seconds must be between 5 and 3600")
+    if not time_ok(screen.get("off_at")) or not time_ok(screen.get("on_at")):
+        raise SystemExit('screen.off_at and screen.on_at must look like "23:00"')
+    if bool(screen.get("off_at")) != bool(screen.get("on_at")):
+        raise SystemExit("screen.off_at and screen.on_at must be set together")
+    if screen.get("method") not in SCREEN_METHODS:
+        raise SystemExit("screen.method must be one of: " + ", ".join(SCREEN_METHODS))
+    if not isinstance(screen.get("wake_on_alert"), bool):
+        raise SystemExit("screen.wake_on_alert must be true or false")
 
 
 def fetch_json(url, timeout):
@@ -698,6 +723,31 @@ class WifiSetup:
             self.busy.release()
 
 
+class ScreenState:
+    """Whether the dashboard page says the screen is asleep.
+
+    The page reports its state when it changes and every 30 s. If the reports stop
+    (browser crashed, page closed) the answer falls back to "on", so a failure can
+    never leave the display dark.
+    """
+    STALE_S = 90
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.state = "on"
+        self.stamp = time.time()
+
+    def report(self, state):
+        with self.lock:
+            self.state = state
+            self.stamp = time.time()
+
+    def current(self):
+        with self.lock:
+            fresh = time.time() - self.stamp < self.STALE_S
+            return self.state if fresh else "on"
+
+
 class Collector:
     def __init__(self, cfg, demo=False, config_path=None):
         self.cfg = cfg
@@ -708,6 +758,7 @@ class Collector:
         self.streaks = {}
         self.pi = PiInfo(lambda: self.cfg["thresholds"], demo=demo)
         self.wifi = WifiSetup(lambda: self.cfg, demo=demo)
+        self.screen = ScreenState()
         self.lock = threading.Lock()
         self.state = {"hosts": [], "alerts": [], "updated": None}
 
@@ -757,6 +808,7 @@ class Collector:
             "alerts": alerts,
             "updated": time.time(),
             "config_error": self.config_error,
+            "screen": cfg["screen"],
             "summary": {
                 "hosts": len(hosts),
                 "online": sum(1 for h in hosts if h["online"]),
@@ -850,6 +902,8 @@ def make_handler(collector):
                 return self.send_json(collector.snapshot())
             if route == "/api/pi":
                 return self.send_json({**collector.pi.snapshot(), "wifi_setup": collector.wifi.status()})
+            if route == "/api/screen":
+                return self.send_json({"state": collector.screen.current(), "method": collector.cfg["screen"]["method"]})
             if self.path == "/healthz":
                 self.send_response(200)
                 self.end_headers()
@@ -866,21 +920,31 @@ def make_handler(collector):
                     and name in ("127.0.0.1", "localhost", "::1")
                     and (origin is None or origin == f"http://{host}"))
 
-        def do_POST(self):
-            route = self.path.split("?")[0]
-            if route not in ("/api/wifi/scan", "/api/wifi/connect"):
-                return self.send_json({"error": "Not found."}, 404)
-            if not self.local_request():
-                return self.send_json({"error": "Wi-Fi setup only works on the Pi's own screen."}, 403)
+        def read_json_body(self):
+            """The request's JSON object, or None when it is missing, too big, not JSON or not an object."""
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 if not 0 < length <= 4096 or "application/json" not in (self.headers.get("Content-Type") or ""):
-                    raise ValueError
+                    return None
                 body = json.loads(self.rfile.read(length))
-                if not isinstance(body, dict):
-                    raise ValueError
             except ValueError:
+                return None
+            return body if isinstance(body, dict) else None
+
+        def do_POST(self):
+            route = self.path.split("?")[0]
+            if route not in ("/api/wifi/scan", "/api/wifi/connect", "/api/screen"):
+                return self.send_json({"error": "Not found."}, 404)
+            if not self.local_request():
+                return self.send_json({"error": "This only works on the Pi's own screen."}, 403)
+            body = self.read_json_body()
+            if body is None:
                 return self.send_json({"error": "Bad request."}, 400)
+            if route == "/api/screen":
+                if body.get("state") not in ("on", "off"):
+                    return self.send_json({"error": "state must be on or off."}, 400)
+                collector.screen.report(body["state"])
+                return self.send_json({"ok": True})
             wifi = collector.wifi
             try:
                 wifi.authorise(body.get("pin"))
