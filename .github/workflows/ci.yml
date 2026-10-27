@@ -10,7 +10,7 @@ jobs:
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
       - name: Screen sleep logic tests
-        run: node --test tests/
+        run: node --test tests/*.test.js
       - name: ShellCheck
         run: shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
       - name: Validate compose file

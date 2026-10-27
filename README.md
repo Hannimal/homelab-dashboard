@@ -246,7 +246,7 @@ cd pi && cp config.example.json config.json && python3 server.py --demo
 Tests (standard library only) and the checks CI runs:
 
 ```bash
-node --test tests/
+node --test tests/*.test.js
 python3 -m unittest discover -s tests -v
 shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
 ```
