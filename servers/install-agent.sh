@@ -20,7 +20,8 @@ fi
 
 mkdir -p "$DEST"
 cp docker-compose.yml glances.conf "$DEST/"
-TZ_NAME="$(cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || echo Etc/UTC)"
+TZ_NAME="$(cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || true)"
+[ -n "$TZ_NAME" ] || TZ_NAME=Etc/UTC
 echo "TZ=$TZ_NAME" > "$DEST/.env"
 
 cd "$DEST"
@@ -30,6 +31,10 @@ docker compose up -d
 if [ -n "$PI_IP" ] && command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow from "$PI_IP" to any port 61208 proto tcp comment 'homelab dashboard'
   echo "Firewall: port 61208 opened for $PI_IP only."
+else
+  echo "WARNING: no firewall rule was added. The Glances API (port 61208, no password)" >&2
+  echo "         is reachable by everything on this network. Re-run with the Pi's IP while" >&2
+  echo "         ufw is active, or restrict the port yourself." >&2
 fi
 
 echo -n "Waiting for the API"

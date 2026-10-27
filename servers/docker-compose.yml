@@ -1,7 +1,7 @@
 # Glances agent: exposes this host's system + Docker stats as a read-only JSON API on :61208
 services:
   glances:
-    image: nicolargo/glances:latest
+    image: nicolargo/glances:4.5.8   # pinned: the dashboard reads the /api/4 JSON shapes
     container_name: glances-agent
     restart: unless-stopped
     pid: host                # see host processes, not just the container's

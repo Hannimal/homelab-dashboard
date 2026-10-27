@@ -61,7 +61,7 @@ A server turns amber ("Attention") when any of these happen:
 - CPU, memory, disk or temperature passes a threshold.
 - A container is exited, restarting or dead.
 
-It turns red ("Offline") when its agent stops answering.
+It turns red ("Offline") when its agent stops answering. If the data stops updating, or the Pi service can't be reached, a red "stale" or "service unreachable" note appears next to the title on every screen.
 
 ## Settings (`/opt/homelab-dashboard/config.json` on the Pi)
 
@@ -70,7 +70,8 @@ It turns red ("Offline") when its agent stops answering.
 | `hosts` | Name and IP of each server. Add a 4th server here and the layout adapts. |
 | `thresholds` | Warning levels for CPU %, memory %, disk % and temperature °C. |
 | `hide_containers` | Containers never shown (the agent itself by default). |
-| `expected_stopped` | Containers that are allowed to be stopped, such as one-shot backup jobs, so they don't raise alerts. |
+| `expected_stopped` | Containers that are allowed to be stopped, such as one-shot backup jobs, so they don't raise alerts. Also accepted inside a single host entry (`"expected_stopped": ["backup"]`) to apply to that host only. |
+| `alert_confirm_samples` | How many polls in a row a problem must last before it shows (default 2, about 10 s). Stops a value hovering at a threshold from flipping the screen back and forth. Set to 1 for instant alerts. |
 | `disk_mounts` (per host) | Limit which mount points count as disks, e.g. `["/", "/host/data"]`. |
 | `listen` / `port` | Where the Pi serves the page. Set `listen` to `"0.0.0.0"` to open the dashboard from your laptop too. |
 
@@ -105,7 +106,8 @@ The dashboard scales itself to fit whatever resolution the screen reports, so it
 
 ## Security notes
 
-- The Glances API has no password. It is read-only, but anyone on your LAN can see the stats. The `ufw` rule from step 1 limits it to the Pi.
+- The agent image is pinned (`nicolargo/glances:4.5.8`) because the dashboard depends on its JSON format. To upgrade, change the tag in `servers/docker-compose.yml`, run the demo or a real poll against it, then redeploy.
+- The Glances API has no password. It is read-only, but anyone on your LAN can see the stats. The `ufw` rule from step 1 limits it to the Pi. The installer prints a warning when it couldn't add that rule (no Pi IP given, or `ufw` missing or inactive), because the port is then open to the whole network.
 - Mounting the Docker socket gives the agent container full control of Docker, even with `:ro`, because that flag only stops the file being replaced, not API calls. Glances only reads from it, but keep the image from a trusted source, as this setup does.
 - On the Pi the aggregator runs as a locked-down throwaway user (`DynamicUser`) and by default listens only on the Pi itself.
 
@@ -129,6 +131,13 @@ cd pi && cp config.example.json config.json && python3 server.py --demo
 # open http://127.0.0.1:8080
 ```
 
+Tests (standard library only) and the checks CI runs:
+
+```bash
+python3 -m unittest discover -s tests -v
+shellcheck -S warning deploy.sh pi/*.sh servers/*.sh
+```
+
 ### Layout
 
 | Path | What it is |
@@ -139,6 +148,8 @@ cd pi && cp config.example.json config.json && python3 server.py --demo
 | `pi/kiosk.sh`, `pi/start-kiosk.sh` | Start Chromium in cage, with logging and retries |
 | `pi/install-pi.sh`, `pi/diagnose.sh` | Pi installer and health check |
 | `deploy.sh` | Push code to the Pi or a server and install |
+| `tests/` | Unit tests for the aggregator |
+| `.github/workflows/ci.yml` | Runs the tests, ShellCheck and a compose-file check |
 
 ## Uninstall
 

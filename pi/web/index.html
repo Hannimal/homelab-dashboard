@@ -62,6 +62,7 @@
   .foot b { font-weight: 400; color: var(--text); }
   .offline { margin: auto 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
 
+  header .stale { color: var(--down); }
   .statusline { padding: 10px 0; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted);
                 display: flex; justify-content: space-between; gap: 16px; white-space: nowrap; }
   .statusline .msg { overflow: hidden; text-overflow: ellipsis; }
@@ -104,7 +105,7 @@
 <body>
 <div id="stage">
   <header>
-    <div><span class="title">Home Lab</span><span class="sub" id="summary">Connecting…</span></div>
+    <div><span class="title">Home Lab</span><span class="sub" id="summary">Connecting…</span><span class="sub stale" id="staleBadge" hidden></span></div>
     <div class="right" id="headerRight"><span class="clock" id="clock"></span></div>
   </header>
 
@@ -262,7 +263,12 @@
     else if (view === "containers") renderContainers();
     else renderAlerts();
     const age = state.updated ? Math.round(Date.now() / 1000 - state.updated) : null;
-    $("updated").innerHTML = age == null ? "" : age > STALE_S ? `<span class="hl">Data is ${age}s old</span>` : `Updated ${Math.max(0, age)}s ago`;
+    const stale = age != null && age > STALE_S;
+    $("updated").innerHTML = age == null ? "" : stale ? `<span class="hl">Data is ${age}s old</span>` : `Updated ${Math.max(0, age)}s ago`;
+    // Visible on every view: a frozen screen must never look healthy
+    const badge = $("staleBadge");
+    badge.textContent = fetchError ? "· service unreachable" : stale ? `· stale (${age}s old)` : "";
+    badge.hidden = !badge.textContent;
   }
 
   async function poll() {

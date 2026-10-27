@@ -18,5 +18,6 @@
   },
 
   "hide_containers": ["glances-agent"],
-  "expected_stopped": []
+  "expected_stopped": [],
+  "alert_confirm_samples": 2
 }

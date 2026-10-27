@@ -35,6 +35,7 @@ DEFAULTS = {
     "thresholds": {"cpu_warn": 90, "mem_warn": 90, "disk_warn": 85, "temp_warn": 80},
     "hide_containers": ["glances-agent"],
     "expected_stopped": [],
+    "alert_confirm_samples": 2,
     "hosts": [],
 }
 
@@ -205,36 +206,68 @@ def collect_host(host, cfg):
     return out
 
 
-def evaluate(host, cfg):
-    """Attach status + alert list to a host."""
+def evaluate(host, cfg, host_cfg=None):
+    """Attach status + alert list to a host.
+
+    Each alert carries a stable `key` (independent of the current value) so the
+    collector can tell whether the same problem persisted across polls.
+    """
     t = cfg["thresholds"]
     alerts = []
     if not host["online"]:
         host["status"] = "down"
-        host["alerts"] = [{"host": host["name"], "level": "down", "text": "Agent not responding"}]
+        host["alerts"] = [{"host": host["name"], "level": "down", "key": "down", "text": "Agent not responding"}]
         return host
 
-    def add(text):
-        alerts.append({"host": host["name"], "level": "warn", "text": text})
+    def add(key, text):
+        alerts.append({"host": host["name"], "level": "warn", "key": key, "text": text})
 
     if host["cpu"] >= t["cpu_warn"]:
-        add(f"CPU at {host['cpu']:.0f}%")
+        add("cpu", f"CPU at {host['cpu']:.0f}%")
     if host["mem_pct"] >= t["mem_warn"]:
-        add(f"Memory at {host['mem_pct']:.0f}%")
+        add("mem", f"Memory at {host['mem_pct']:.0f}%")
     for d in host["disks"]:
         if d["pct"] >= t["disk_warn"]:
-            add(f"Disk {d['mount']} at {d['pct']:.0f}%")
+            add(f"disk:{d['mount']}", f"Disk {d['mount']} at {d['pct']:.0f}%")
     if host.get("temp") is not None and host["temp"] >= t["temp_warn"]:
-        add(f"CPU temperature {host['temp']}°C")
-    ok_stopped = set(cfg["expected_stopped"])
+        add("temp", f"CPU temperature {host['temp']}°C")
+    ok_stopped = set(cfg["expected_stopped"]) | set((host_cfg or {}).get("expected_stopped") or [])
     for c in host["containers"]:
         if c["status"] == "running" or c["name"] in ok_stopped:
             continue
-        add(f"{c['name']} is {c['status']}")
+        add(f"container:{c['name']}:{c['status']}", f"{c['name']} is {c['status']}")
 
     host["alerts"] = alerts
     host["status"] = "warn" if alerts else "ok"
     return host
+
+
+def debounce(hosts, streaks, confirm):
+    """Only report an alert once it has been seen in `confirm` consecutive polls.
+
+    `streaks` maps (host, key) -> consecutive count and is updated in place; keys
+    that did not fire this poll are dropped, so a recovered problem starts over.
+    A host that is offline but not yet confirmed shows as "warn" rather than "ok".
+    """
+    seen = set()
+    for h in hosts:
+        confirmed = []
+        for a in h["alerts"]:
+            k = (a["host"], a["key"])
+            seen.add(k)
+            streaks[k] = streaks.get(k, 0) + 1
+            if streaks[k] >= confirm:
+                confirmed.append(a)
+        h["alerts"] = confirmed
+        if any(a["level"] == "down" for a in confirmed):
+            h["status"] = "down"
+        elif confirmed or not h["online"]:
+            h["status"] = "warn"
+        else:
+            h["status"] = "ok"
+    for k in [k for k in streaks if k not in seen]:
+        del streaks[k]
+    return hosts
 
 
 class Collector:
@@ -244,6 +277,7 @@ class Collector:
         self.config_path = config_path
         self.config_mtime = os.path.getmtime(config_path) if config_path else None
         self.config_error = None
+        self.streaks = {}
         self.lock = threading.Lock()
         self.state = {"hosts": [], "alerts": [], "updated": None}
 
@@ -275,14 +309,18 @@ class Collector:
 
     def poll_once(self):
         self.reload_config_if_changed()
-        hosts_cfg = self.cfg["hosts"]
+        cfg = self.cfg  # one config for the whole poll, even if a reload lands meanwhile
+        hosts_cfg = cfg["hosts"]
         if self.demo:
             hosts = [demo_host(h, i) for i, h in enumerate(hosts_cfg)]
         else:
             with ThreadPoolExecutor(max_workers=max(1, len(hosts_cfg))) as pool:
-                hosts = list(pool.map(lambda h: collect_host(h, self.cfg), hosts_cfg))
-        hosts = [evaluate(h, self.cfg) for h in hosts]
-        alerts = [a for h in hosts for a in h["alerts"]]
+                hosts = list(pool.map(lambda h: collect_host(h, cfg), hosts_cfg))
+        hosts = [evaluate(h, cfg, hc) for h, hc in zip(hosts, hosts_cfg)]
+        hosts = debounce(hosts, self.streaks, max(1, int(cfg["alert_confirm_samples"])))
+        alerts = [{k: v for k, v in a.items() if k != "key"} for h in hosts for a in h["alerts"]]
+        for h in hosts:
+            h["alerts"] = [{k: v for k, v in a.items() if k != "key"} for a in h["alerts"]]
         state = {
             "hosts": hosts,
             "alerts": alerts,
