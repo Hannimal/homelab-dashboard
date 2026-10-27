@@ -410,10 +410,13 @@
     const w = wifi, el = $("wifi"), back = `<button class="btn" data-w="back">Back</button>`;
     let html;
     if (w.step === "pin") {
-      const dots = w.busy ? "Checking…" : "●".repeat(w.pin.length) || "Enter the PIN";
+      const dots = w.busy ? "Checking the PIN and scanning for networks… (about 10 s)" : "●".repeat(w.pin.length) || "Enter the PIN";
       html = `<div class="wtitle"><span>Wi-Fi settings</span>${back}</div><div class="field${w.pin && !w.busy ? "" : " ph"}">${dots}</div>` +
         (w.msg ? `<div class="werr">${esc(w.msg)}</div>` : "") +
         `<div class="pad">${"123456789".split("").map((n) => keyBtn(n)).join("")}${keyBtn("{bs}", "⌫")}${keyBtn("0")}${keyBtn("{ok}", "OK", "go")}</div>`;
+    } else if (w.step === "list" && w.busy) {
+      html = `<div class="wtitle"><span>Choose a network</span></div>` +
+        `<div class="empty">Scanning for networks…<br><span class="muted">This takes about 10 seconds.</span></div>`;
     } else if (w.step === "list") {
       html = `<div class="wtitle"><span>Choose a network</span><span><button class="btn" data-w="rescan">Rescan</button>${back}</span></div>` +
         (w.msg ? `<div class="werr">${esc(w.msg)}</div>` : "") +

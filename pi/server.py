@@ -612,6 +612,7 @@ class WifiSetup:
     MAX_FAILS = 5
     LOCK_S = 60
     WINDOW_S = 300
+    SCAN_TIMEOUT_S = 20
 
     def __init__(self, get_cfg, demo=False):
         self.get_cfg = get_cfg
@@ -657,10 +658,21 @@ class WifiSetup:
     def scan(self):
         if self.demo:
             return DEMO_WIFI
-        out = run(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "yes"])
-        if out is None:
-            raise WifiError(503, "Could not scan for networks.")
-        return parse_wifi_list(out)
+        # A fresh scan can take several seconds. If it is refused or times out, fall back to
+        # NetworkManager's cached list, and report nmcli's own message if that fails too.
+        problem = "Scanning timed out."
+        for rescan in ("yes", "no"):
+            try:
+                r = subprocess.run(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list",
+                                    "--rescan", rescan], capture_output=True, text=True, timeout=self.SCAN_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                continue
+            except OSError:
+                raise WifiError(503, "NetworkManager (nmcli) is not available.")
+            if r.returncode == 0:
+                return parse_wifi_list(r.stdout)
+            problem = clean_nmcli_error(r.stderr or r.stdout)
+        raise WifiError(502, problem)
 
     def connect(self, ssid, password, hidden=False):
         error = validate_wifi_input(ssid, password)

@@ -348,6 +348,43 @@ class WifiSetup(unittest.TestCase):
         self.assertNotIn("s3cret-pass", " ".join(cmd))
         self.assertEqual(run.call_args.kwargs["input"], "s3cret-pass\n")
 
+    def real(self):
+        return server.WifiSetup(lambda: {"wifi_pin": "4321"}, demo=False)
+
+    def test_scan_waits_for_a_slow_rescan(self):
+        ok = mock.Mock(returncode=0, stdout="*:Home:82:WPA2\n", stderr="")
+        with mock.patch.object(server.subprocess, "run", return_value=ok) as run:
+            nets = self.real().scan()
+        self.assertEqual(nets[0]["ssid"], "Home")
+        self.assertGreaterEqual(run.call_args.kwargs["timeout"], 15)
+
+    def test_scan_falls_back_to_cached_list_when_rescan_times_out(self):
+        import subprocess
+        ok = mock.Mock(returncode=0, stdout=":Cafe:40:--\n", stderr="")
+        effects = [subprocess.TimeoutExpired("nmcli", 20), ok]
+        with mock.patch.object(server.subprocess, "run", side_effect=effects) as run:
+            nets = self.real().scan()
+        self.assertEqual([n["ssid"] for n in nets], ["Cafe"])
+        self.assertEqual([c.args[0][-1] for c in run.call_args_list], ["yes", "no"])
+
+    def test_scan_reports_nmcli_error(self):
+        bad = mock.Mock(returncode=1, stdout="", stderr="Error: Not authorized to control networking.\n")
+        with mock.patch.object(server.subprocess, "run", return_value=bad):
+            with self.assertRaises(server.WifiError) as e:
+                self.real().scan()
+        self.assertEqual(e.exception.message, "Not authorized to control networking.")
+
+    def test_scan_timeout_and_missing_nmcli(self):
+        import subprocess
+        with mock.patch.object(server.subprocess, "run", side_effect=subprocess.TimeoutExpired("nmcli", 20)):
+            with self.assertRaises(server.WifiError) as e:
+                self.real().scan()
+        self.assertEqual(e.exception.message, "Scanning timed out.")
+        with mock.patch.object(server.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaises(server.WifiError) as e:
+                self.real().scan()
+        self.assertEqual(e.exception.status, 503)
+
     def test_connect_error_is_cleaned(self):
         ws = server.WifiSetup(lambda: {"wifi_pin": "4321"}, demo=False)
         bad = mock.Mock(returncode=4, stdout="", stderr="Error: Connection activation failed: Secrets were required\n")
