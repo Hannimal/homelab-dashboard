@@ -41,13 +41,20 @@
   .host:last-child { padding-right: 0; border-right: 0; }
   .host .top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .host .name { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .state { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  /* Server status as a tag: tinted background, outline and a dot, coloured by state */
+  .state { display: flex; flex: none; align-items: center; gap: 7px; padding: 5px 13px 5px 11px; border-radius: 999px;
+           font-size: 13px; font-weight: 500; letter-spacing: .01em; white-space: nowrap;
+           color: var(--ok); background: rgba(111, 191, 159, .12); border: 1px solid rgba(111, 191, 159, .38); }
+  .state .dot { width: 8px; height: 8px; }
+  /* Four or more servers make narrow columns: put the tag under the name so the name is never clipped */
+  #overview.stacked .top { flex-direction: column; align-items: flex-start; gap: 8px; }
+  #overview.stacked .name { max-width: 100%; }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
   .warn .dot, .dot.warn { background: var(--warn); }
   .down .dot, .dot.down { background: var(--down); }
   .dot.off { background: var(--off); }
-  .state.warn { color: var(--warn); }
-  .state.down { color: var(--down); }
+  .state.warn { color: var(--warn); background: rgba(229, 165, 75, .12); border-color: rgba(229, 165, 75, .42); }
+  .state.down { color: var(--down); background: rgba(226, 104, 92, .12); border-color: rgba(226, 104, 92, .42); }
   .big { font-size: 40px; font-weight: 300; line-height: 1; }
   .big small { font-size: 18px; color: var(--muted); }
   .caption { font-size: 11px; color: var(--muted); margin-top: 4px; }
@@ -290,6 +297,7 @@
   function renderOverview() {
     const el = $("overview");
     el.style.gridTemplateColumns = `repeat(${Math.max(1, state.hosts.length)}, minmax(0, 1fr))`;
+    el.classList.toggle("stacked", state.hosts.length >= 4);
     el.innerHTML = state.hosts.map((h) => {
       const head = `<div class="top"><span class="name">${esc(h.name)}</span>` +
                    `<span class="state ${h.status === "ok" ? "" : h.status}"><span class="dot"></span>${stateLabel[h.status]}</span></div>`;
