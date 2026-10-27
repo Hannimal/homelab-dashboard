@@ -286,7 +286,9 @@
   setInterval(poll, POLL_MS);
   setInterval(render, 1000 * 5);
   poll();
-  show("overview");
+  // Optional deep link (e.g. http://pi:8080/#alerts), handy for screenshots
+  const startView = location.hash.slice(1);
+  show(["containers", "alerts"].includes(startView) ? startView : "overview");
 })();
 </script>
 </body>

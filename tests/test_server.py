@@ -223,6 +223,30 @@ class Config(unittest.TestCase):
             os.unlink(f.name)
 
 
+class Http(unittest.TestCase):
+    def test_security_headers_and_endpoints(self):
+        import threading
+        import urllib.request
+        c = server.Collector(cfg(), demo=True)
+        c.poll_once()
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(c))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            for path in ("/", "/api/state", "/healthz"):
+                with urllib.request.urlopen(base + path) as r:
+                    self.assertEqual(r.status, 200, path)
+                    self.assertIn("frame-ancestors 'none'", r.headers["Content-Security-Policy"], path)
+                    self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff", path)
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(base + "/../server.py")
+            self.assertEqual(e.exception.code, 404)
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(base + "/%2e%2e/server.py")
+        finally:
+            httpd.shutdown()
+
+
 class PollOnce(unittest.TestCase):
     def test_demo_poll_strips_internal_keys_and_debounces(self):
         c = server.Collector(cfg(hosts=[{"name": "n", "address": "x"}] * 3), demo=True)

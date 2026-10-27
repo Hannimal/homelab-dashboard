@@ -12,27 +12,33 @@ A small status screen for a 5" Raspberry Pi display. Each Docker server runs a G
 
 Nothing to compile and no pip packages: the agent is the official `nicolargo/glances` image, and the Pi side is plain Python 3 plus one HTML file.
 
+<p>
+  <img src="docs/screenshot-overview.png" alt="Overview: one column per server with CPU, memory, disk and temperature" width="49%">
+  <img src="docs/screenshot-containers.png" alt="Containers: per-server list with problems first" width="49%">
+</p>
+<p>
+  <img src="docs/screenshot-alerts.png" alt="Alerts: everything that needs attention" width="49%">
+</p>
+
+_Screenshots use the built-in demo data (`python3 server.py --demo`), at the screen's native 800×480._
+
+> **Network use only.** There is no authentication anywhere in this setup. It is designed for a trusted home network. Read [Security notes](#security-notes) before exposing anything.
+
 ## Install
 
-Both machines install from this repo with `install.sh`. It clones the repo into `~/homelab-dashboard-src`, runs the right installer, and **running it again updates everything**. Run it as your normal user, not with `sudo`.
+Both machines install from this repo with `install.sh`. It clones the repo into `~/homelab-dashboard-src`, runs the right installer, and **running it again updates everything**. Run it as your normal user, not with `sudo`. Docker, `git` access to GitHub and an internet connection are all it needs; `git` is installed for you if missing.
 
-### 0. Give the machine access to the repo
+### 0. Get the installer
 
-The repo is private, so each machine needs read access. The simplest way is a fine-grained personal access token with **read-only Contents access to this repository** (GitHub → Settings → Developer settings → Fine-grained tokens). Keep it in a variable for the commands below:
-
-```bash
-export REPO_TOKEN=github_pat_xxxxxxxx
-```
-
-The token is used for the clone only and is never saved in the repo's settings. Alternatives: set `REPO_URL=git@github.com:Hannimal/homelab-dashboard.git` and use an SSH deploy key, or have `gh auth login` or a git credential helper set up on the machine.
-
-Fetch the installer once, then use it:
+On each machine, download the installer and read it (it runs with `sudo`, so you should know what it does):
 
 ```bash
-curl -fsSL -H "Authorization: Bearer $REPO_TOKEN" \
-  https://raw.githubusercontent.com/Hannimal/homelab-dashboard/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/Hannimal/homelab-dashboard/main/install.sh -o install.sh
+less install.sh
 chmod +x install.sh
 ```
+
+For reproducible installs, pin a release tag instead of following `main`: `REPO_REF=v1.1.0 ./install.sh ...`
 
 ### 1. Each of the 3 servers
 
@@ -74,7 +80,9 @@ Run the same command again on any machine. It fast-forwards the clone, reinstall
 ./install.sh server 192.168.1.50
 ```
 
-To pin a version, set `REPO_REF` to a branch or tag (default `main`), for example `REPO_REF=v1.1 ./install.sh pi`. `INSTALL_DIR` changes where the clone lives.
+To pin a version, set `REPO_REF` to a branch or tag (default `main`), for example `REPO_REF=v1.1.0 ./install.sh pi`. `INSTALL_DIR` changes where the clone lives.
+
+**Using a private fork?** Set `REPO_URL` to your fork and give git access with a read-only fine-grained token (`REPO_TOKEN=github_pat_...`), an SSH deploy key (`REPO_URL=git@github.com:you/homelab-dashboard.git`), or `gh auth login`. A token is used for the clone only and is never saved in the clone's settings.
 
 ### Without GitHub access (copy from your computer)
 
@@ -137,10 +145,21 @@ The dashboard scales itself to fit whatever resolution the screen reports, so it
 
 ## Security notes
 
-- The agent image is pinned (`nicolargo/glances:4.5.8`) because the dashboard depends on its JSON format. To upgrade, change the tag in `servers/docker-compose.yml`, run the demo or a real poll against it, then redeploy.
-- The Glances API has no password. It is read-only, but anyone on your LAN can see the stats. The `ufw` rule from step 1 limits it to the Pi. The installer prints a warning when it couldn't add that rule (no Pi IP given, or `ufw` missing or inactive), because the port is then open to the whole network.
-- Mounting the Docker socket gives the agent container full control of Docker, even with `:ro`, because that flag only stops the file being replaced, not API calls. Glances only reads from it, but keep the image from a trusted source, as this setup does.
-- On the Pi the aggregator runs as a locked-down throwaway user (`DynamicUser`) and by default listens only on the Pi itself.
+This project is meant for a **trusted home network**. What that means in practice:
+
+| Piece | Exposure | What protects it |
+| --- | --- | --- |
+| Glances API on each server (`:61208`) | Read-only JSON, **no password** | The installer adds a `ufw` rule allowing only the Pi's IP. It prints a warning when it can't (no Pi IP given, or `ufw` missing or inactive). Never expose this port to the internet. |
+| Agent container | Mounts the Docker socket, so a compromised agent can control Docker on that host. `:ro` does not prevent this, it only stops the socket file being replaced | Image pinned to a specific version, `no-new-privileges`, firewall rule above. Keep the pin updated (Dependabot opens a PR monthly). |
+| Dashboard on the Pi (`:8080`) | Shows server names, IPs and container names, **no password** | Listens on `127.0.0.1` by default. Only set `listen` to `0.0.0.0` on a network you trust. Responses carry a strict Content-Security-Policy, `nosniff` and no-referrer headers, and all data is HTML-escaped in the page. |
+| Aggregator service | Polls the agents over plain HTTP | Runs as a throwaway user (`DynamicUser`) with no capabilities, a read-only filesystem, a private `/tmp` and only IP and local sockets allowed. |
+| `install.sh` | Runs repository code with `sudo` | Read it before running, pin `REPO_REF` to a release tag, or review changes after `git pull`. Tokens are never written into the clone's remote URL. |
+
+What is **not** in this repo: no credentials, tokens or keys of any kind. Your real `pi/config.json` (which holds your server IPs) is git-ignored. Only `config.example.json` with placeholder addresses is tracked.
+
+Hardening ideas if you want more: put the servers and the Pi on their own VLAN, or tunnel the agent port over WireGuard instead of opening it to the LAN.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Working on the code
 
@@ -149,8 +168,8 @@ This folder is a git repository. Your real `pi/config.json`, which holds your IP
 To push your local checkout to a machine and run its installer without going through GitHub, use `deploy.sh`. It replaces the remote folder each time, so the nested-folder problem with `scp` can't happen.
 
 ```bash
-./deploy.sh pi hannimal@10.1.2.2 --console
-./deploy.sh server you@192.168.1.11 10.1.2.2   # last argument: the Pi's IP, for the firewall rule
+./deploy.sh pi you@192.168.1.50 --console
+./deploy.sh server you@192.168.1.11 192.168.1.50   # last argument: the Pi's IP, for the firewall rule
 ```
 
 Re-deploying the Pi keeps your live settings in `/opt/homelab-dashboard/config.json`.
@@ -180,6 +199,7 @@ shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
 | `pi/install-pi.sh`, `pi/diagnose.sh` | Pi installer and health check |
 | `install.sh` | Install or update a machine from GitHub (clones the repo, runs the installer) |
 | `deploy.sh` | Push your local checkout to a machine over SSH and install |
+| `docs/` | Screenshots used in this README |
 | `tests/` | Unit tests for the aggregator |
 | `.github/workflows/ci.yml` | Runs the tests, ShellCheck and a compose-file check |
 
@@ -187,3 +207,7 @@ shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
 
 - **Server:** `cd /opt/homelab-agent && sudo docker compose down && sudo rm -rf /opt/homelab-agent`
 - **Pi:** `sudo systemctl disable --now homelab-dashboard && sudo rm -rf /opt/homelab-dashboard /etc/systemd/system/homelab-dashboard.service`, then remove the "homelab-dashboard kiosk" block from `~/.profile` (Lite) or the `kiosk.sh` line from `~/.config/labwc/autostart` (desktop).
+
+## License
+
+[MIT](LICENSE)

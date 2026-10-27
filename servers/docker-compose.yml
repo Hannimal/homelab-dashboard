@@ -4,7 +4,9 @@ services:
     image: nicolargo/glances:4.5.8   # pinned: the dashboard reads the /api/4 JSON shapes
     container_name: glances-agent
     restart: unless-stopped
-    pid: host                # see host processes, not just the container's
+    security_opt:
+      - no-new-privileges:true
+    pid: host               # see host processes, not just the container's
     network_mode: host       # report real host network interfaces
     environment:
       - GLANCES_OPT=-w --disable-webui -C /glances/conf/glances.conf

@@ -409,6 +409,15 @@ def make_handler(collector):
         def __init__(self, *a, **kw):
             super().__init__(*a, directory=WEB_DIR, **kw)
 
+        def end_headers(self):
+            # The page only ever talks to this server: no framing, no outside requests.
+            self.send_header("Content-Security-Policy",
+                             "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                             "style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            super().end_headers()
+
         def do_GET(self):
             if self.path.split("?")[0] == "/api/state":
                 body = json.dumps(collector.snapshot()).encode("utf-8")

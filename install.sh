@@ -8,9 +8,10 @@
 # already there), then runs the matching installer from that checkout. Running it
 # again is how you update.
 #
-# The repo is private, so git needs access. Pick one:
+# The public repo needs no credentials. For a private fork, set REPO_URL to the fork
+# and give git access with one of:
 #   * REPO_TOKEN=<fine-grained token with read-only "Contents" access>   (simplest)
-#   * REPO_URL=git@github.com:Hannimal/homelab-dashboard.git             (SSH key or deploy key)
+#   * REPO_URL=git@github.com:you/homelab-dashboard.git                  (SSH key or deploy key)
 #   * a git credential helper or `gh auth login` already set up on the machine
 #
 # Other settings: INSTALL_DIR (default ~/homelab-dashboard-src), REPO_REF (branch or tag, default main).
@@ -20,7 +21,7 @@ REPO_URL="${REPO_URL:-https://github.com/Hannimal/homelab-dashboard.git}"
 REPO_REF="${REPO_REF:-main}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/homelab-dashboard-src}"
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 target="${1:-}"
 [ -n "$target" ] || usage
 shift

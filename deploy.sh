@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Push the current code to the Pi or a server and run its installer.
 #
-#   ./deploy.sh pi     hannimal@10.1.2.2 [--demo] [--console]
+#   ./deploy.sh pi     you@192.168.1.50  [--demo] [--console]
 #   ./deploy.sh server you@192.168.1.11  [PI_IP]
 #
 # Replaces the remote folder each time (no nested-folder surprises).
