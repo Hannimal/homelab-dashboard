@@ -8,7 +8,7 @@ jobs:
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
       - name: ShellCheck
-        run: shellcheck -S warning deploy.sh pi/*.sh servers/*.sh
+        run: shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
       - name: Validate compose file
         run: docker compose -f servers/docker-compose.yml config -q
       - name: Validate example config

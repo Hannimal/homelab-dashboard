@@ -1,6 +1,8 @@
 # Home lab dashboard
 
-A small status screen for a 5" Raspberry Pi display: one Glances agent per Docker server, a lightweight aggregator on the Pi, and the minimal dashboard you approved, running full screen in Chromium.
+[![CI](https://github.com/Hannimal/homelab-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/Hannimal/homelab-dashboard/actions/workflows/ci.yml)
+
+A small status screen for a 5" Raspberry Pi display. Each Docker server runs a Glances agent, a lightweight aggregator on the Pi polls them, and a minimal dashboard runs full screen in Chromium.
 
 ```
  node-01 ─┐  Glances agent (Docker, :61208)
@@ -10,44 +12,73 @@ A small status screen for a 5" Raspberry Pi display: one Glances agent per Docke
 
 Nothing to compile and no pip packages: the agent is the official `nicolargo/glances` image, and the Pi side is plain Python 3 plus one HTML file.
 
-## Morning checklist (about 15 minutes)
+## Install
+
+Both machines install from this repo with `install.sh`. It clones the repo into `~/homelab-dashboard-src`, runs the right installer, and **running it again updates everything**. Run it as your normal user, not with `sudo`.
+
+### 0. Give the machine access to the repo
+
+The repo is private, so each machine needs read access. The simplest way is a fine-grained personal access token with **read-only Contents access to this repository** (GitHub → Settings → Developer settings → Fine-grained tokens). Keep it in a variable for the commands below:
+
+```bash
+export REPO_TOKEN=github_pat_xxxxxxxx
+```
+
+The token is used for the clone only and is never saved in the repo's settings. Alternatives: set `REPO_URL=git@github.com:Hannimal/homelab-dashboard.git` and use an SSH deploy key, or have `gh auth login` or a git credential helper set up on the machine.
+
+Fetch the installer once, then use it:
+
+```bash
+curl -fsSL -H "Authorization: Bearer $REPO_TOKEN" \
+  https://raw.githubusercontent.com/Hannimal/homelab-dashboard/main/install.sh -o install.sh
+chmod +x install.sh
+```
 
 ### 1. Each of the 3 servers
 
-Copy the `servers` folder over and run the installer. Passing the Pi's IP opens the port only to the Pi when `ufw` is active.
+Pass the Pi's IP so the firewall (`ufw`, when active) opens the agent's port only to the Pi:
 
 ```bash
-scp -r servers you@192.168.1.11:~/homelab-agent
-ssh you@192.168.1.11
-cd ~/homelab-agent && sudo ./install-agent.sh 192.168.1.50   # ← your Pi's IP
+./install.sh server 192.168.1.50      # ← your Pi's IP
 ```
 
-It finishes with "Agent running on …". Repeat for the other two servers.
+It finishes with "Agent running on …". Repeat on the other servers. Docker and the Docker Compose plugin must already be installed.
 
 ### 2. The Raspberry Pi
 
-No desktop is needed. The recommended base is **Raspberry Pi OS Lite (64-bit)**. On it, the dashboard runs in `cage`, a tiny Wayland compositor that shows a single full-screen app, so there's no desktop, window manager or login screen.
+No desktop is needed. The recommended base is **Raspberry Pi OS Lite (64-bit)**. The dashboard runs in `cage`, a tiny Wayland compositor that shows a single full-screen app, so there is no desktop, window manager or login screen.
 
 1. Flash Raspberry Pi OS Lite (64-bit) with Raspberry Pi Imager. In Imager's settings, set the hostname, your user and password, Wi-Fi if needed, and turn on SSH.
-2. Boot the Pi with the screen attached, then copy the files over and install:
+2. Boot the Pi with the screen attached, SSH in, and run:
 
 ```bash
-scp -r pi you@192.168.1.50:~/homelab-dashboard
-ssh you@192.168.1.50
-cd ~/homelab-dashboard
-cp config.example.json config.json
-nano config.json          # put in your 3 server names and IPs
-./install-pi.sh           # run as your normal user, not sudo
+./install.sh pi --console
+sudo nano /opt/homelab-dashboard/config.json     # put in your 3 server names and IPs
 sudo reboot
 ```
 
-The installer detects that there's no desktop. It installs only `python3`, `curl`, `chromium` and `cage`, and turns on console auto-login. When the Pi logs in on the physical screen, the dashboard starts. SSH logins are unaffected and just give you a normal shell.
+The first run installs only `python3`, `curl`, `chromium` and `cage` (and `git` if missing), turns on console auto-login, and starts the service. The config you edit picks up changes within a few seconds, so there is no need to re-run anything. Before you reboot, check `curl -s localhost:8080/api/state` or run `/opt/homelab-dashboard/diagnose.sh`.
 
-It prints each host as `online` or `NOT RESPONDING` before you reboot, so you know it works before looking at the screen. To try the screen before the servers are ready, run `./install-pi.sh --demo`. It shows the mockup's sample data. Run `./install-pi.sh` again later to switch to real data.
+To try the screen before the servers are ready, run `./install.sh pi --demo`. It shows sample data. Run `./install.sh pi` later to switch to real data.
 
-If the Pi already runs the desktop edition, the same installer adds the dashboard to the desktop's autostart instead.
+If the Pi already runs the desktop edition, leave out `--console` and the installer adds the dashboard to the desktop's autostart instead.
 
 **Which Pi.** Chromium is the heaviest part of this setup. A Pi 3B+, 4 or 5 runs it comfortably. A Pi Zero 2 W or 3A+ (512 MB) works, but only just.
+
+### Updating
+
+Run the same command again on any machine. It fast-forwards the clone, reinstalls, and keeps your live settings in `/opt/homelab-dashboard/config.json`.
+
+```bash
+./install.sh pi --console
+./install.sh server 192.168.1.50
+```
+
+To pin a version, set `REPO_REF` to a branch or tag (default `main`), for example `REPO_REF=v1.1 ./install.sh pi`. `INSTALL_DIR` changes where the clone lives.
+
+### Without GitHub access (copy from your computer)
+
+If you'd rather push your local checkout straight to a machine over SSH, use `deploy.sh` (see [Working on the code](#working-on-the-code)).
 
 ## Using the screen
 
@@ -77,7 +108,7 @@ It turns red ("Offline") when its agent stops answering. If the data stops updat
 
 Edit it on the Pi with `sudo nano /opt/homelab-dashboard/config.json`. Changes apply within a few seconds, with no restart needed. The only exceptions are `listen` and `port`, which need `sudo systemctl restart homelab-dashboard`.
 
-The `config.json` in the folder you copied over is only read when you run `./install-pi.sh`, which copies it into `/opt`. Editing that copy does nothing until you re-run the installer.
+A `pi/config.json` in the cloned repo (git-ignored) is only read when you run the installer, which copies it into `/opt`. Editing that copy does nothing until you re-run the installer; edit the one in `/opt` instead.
 
 If you save invalid JSON, such as a missing quote or a trailing comma, the dashboard keeps running on the last good settings and shows the error in red at the bottom of the screen.
 
@@ -101,7 +132,7 @@ The dashboard scales itself to fit whatever resolution the screen reports, so it
 | Containers list is empty | The agent can't read Docker. Check that `/var/run/docker.sock` exists on that server. |
 | No temperature shown | That machine exposes no CPU sensor to Glances. This is common in VMs, and harmless. |
 | Kiosk didn't open after reboot | Over SSH, run `/opt/homelab-dashboard/diagnose.sh`. It checks each piece and prints the fix. The kiosk's own log is `~/.cache/homelab-kiosk.log`. |
-| Pi has a desktop installed but you want the console kiosk | `./install-pi.sh --console` |
+| Pi has a desktop installed but you want the console kiosk | `./install.sh pi --console` |
 | Screen goes black after a while | `sudo raspi-config` → Display Options → Screen Blanking → No |
 
 ## Security notes
@@ -115,7 +146,7 @@ The dashboard scales itself to fit whatever resolution the screen reports, so it
 
 This folder is a git repository. Your real `pi/config.json`, which holds your IPs, is git-ignored. Only `config.example.json` is tracked.
 
-To push the current code to a machine and run its installer, use `deploy.sh`. It replaces the remote folder each time, so the nested-folder problem with `scp` can't happen.
+To push your local checkout to a machine and run its installer without going through GitHub, use `deploy.sh`. It replaces the remote folder each time, so the nested-folder problem with `scp` can't happen.
 
 ```bash
 ./deploy.sh pi hannimal@10.1.2.2 --console
@@ -135,7 +166,7 @@ Tests (standard library only) and the checks CI runs:
 
 ```bash
 python3 -m unittest discover -s tests -v
-shellcheck -S warning deploy.sh pi/*.sh servers/*.sh
+shellcheck -S warning deploy.sh install.sh pi/*.sh servers/*.sh
 ```
 
 ### Layout
@@ -147,7 +178,8 @@ shellcheck -S warning deploy.sh pi/*.sh servers/*.sh
 | `pi/web/index.html` | The dashboard, designed at 800×480 |
 | `pi/kiosk.sh`, `pi/start-kiosk.sh` | Start Chromium in cage, with logging and retries |
 | `pi/install-pi.sh`, `pi/diagnose.sh` | Pi installer and health check |
-| `deploy.sh` | Push code to the Pi or a server and install |
+| `install.sh` | Install or update a machine from GitHub (clones the repo, runs the installer) |
+| `deploy.sh` | Push your local checkout to a machine over SSH and install |
 | `tests/` | Unit tests for the aggregator |
 | `.github/workflows/ci.yml` | Runs the tests, ShellCheck and a compose-file check |
 
